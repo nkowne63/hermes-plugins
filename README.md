@@ -137,10 +137,34 @@ session id; after that, nothing. Scope and privacy:
 Set `session_search_hint: false` if the `session_search` tool is not
 available to the agent; the note then tells it to ask instead.
 
+### `channels` / `guilds` (this fork)
+
+Per-channel and per-guild overrides. Each entry is a partial policy (any of the
+keys above) shallow-merged over the top-level block: guild first, then channel.
+
+```yaml
+session_reset:
+  mode: both
+  idle_minutes: 1440
+  at_hour: 4
+  guilds:
+    "111111111111111111": { mode: idle, idle_minutes: 120 }
+  channels:
+    "222222222222222222": { mode: none }               # never reset here
+    "333333333333333333": { mode: daily, at_hour: 6 }
+```
+
+The channel entry is looked up by the message's `thread_id`, `chat_id`, then
+`parent_chat_id`; the first match wins, so a Discord thread follows its own
+entry when it has one and its parent channel's otherwise. The guild entry is
+looked up by the source's `scope_id` (Discord guild, Slack workspace). IDs are
+compared as strings, so quoted and unquoted YAML keys both work. A channel can
+also turn the policy on where the top level has none (`mode` absent or `none`).
+
 ## Install
 
 ```bash
-hermes plugins install https://github.com/fastfinge/hermes-session-reset-policy.git
+hermes plugins install https://github.com/nkowne63/hermes-session-reset-policy.git
 ```
 
 or clone into `~/.hermes/plugins/` and enable:

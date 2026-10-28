@@ -1188,3 +1188,100 @@ def test_carry_over_through_the_real_new_funnel(plugin, tmp_path, hook_recorder,
     assert new_sid != "seed-sid" and calls.evicted == [key]
     assert reads == [("seed-sid", "seed-sid")]
     assert "session seed-sid" in plugin._carry_over_context(session_id=new_sid, platform="telegram")["context"]
+
+
+# ---------------------------------------------------------------------------
+# Per-channel / per-guild overrides (``session_reset.channels`` / ``guilds``)
+# ---------------------------------------------------------------------------
+
+_SCOPED = {
+    "mode": "both", "idle_minutes": 1440, "at_hour": 4,
+    "guilds": {"g1": {"mode": "idle", "idle_minutes": 120}},
+    "channels": {
+        "quiet": {"mode": "none"},
+        "late": {"at_hour": 6},
+        "thread-own": {"idle_minutes": 30},
+        123: {"mode": "daily"},
+        "junk": "not-a-dict",
+    },
+}
+
+
+def _src(**kw):
+    base = dict(chat_id="other", thread_id=None, parent_chat_id=None, scope_id=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_scoped_policy_without_match_is_top_level_without_tables(plugin):
+    assert plugin._scoped_policy(_SCOPED, _src()) == {"mode": "both", "idle_minutes": 1440, "at_hour": 4}
+
+
+def test_scoped_policy_channel_overrides_only_its_keys(plugin):
+    assert plugin._scoped_policy(_SCOPED, _src(chat_id="late")) == {"mode": "both", "idle_minutes": 1440, "at_hour": 6}
+
+
+def test_scoped_policy_channel_wins_over_guild(plugin):
+    got = plugin._scoped_policy(_SCOPED, _src(chat_id="quiet", scope_id="g1"))
+    assert got["mode"] == "none" and got["idle_minutes"] == 120
+
+
+def test_scoped_policy_guild_alone(plugin):
+    got = plugin._scoped_policy(_SCOPED, _src(scope_id="g1"))
+    assert got == {"mode": "idle", "idle_minutes": 120, "at_hour": 4}
+
+
+def test_scoped_policy_thread_inherits_parent_channel(plugin):
+    got = plugin._scoped_policy(_SCOPED, _src(chat_id="t-99", parent_chat_id="quiet"))
+    assert got["mode"] == "none"
+
+
+def test_scoped_policy_thread_own_entry_beats_parent(plugin):
+    got = plugin._scoped_policy(_SCOPED, _src(chat_id="thread-own", parent_chat_id="quiet"))
+    assert got["mode"] == "both" and got["idle_minutes"] == 30
+
+
+def test_scoped_policy_int_yaml_keys_match_string_ids(plugin):
+    assert plugin._scoped_policy(_SCOPED, _src(chat_id="123"))["mode"] == "daily"
+
+
+def test_scoped_policy_ignores_non_dict_entries(plugin):
+    got = plugin._scoped_policy(_SCOPED, _src(chat_id="junk", parent_chat_id="late"))
+    assert got["at_hour"] == 6
+
+
+def test_scoped_policy_can_enable_where_top_level_is_off(plugin):
+    policy = {"channels": {"on": {"mode": "idle", "idle_minutes": 60}}}
+    assert plugin._scoped_policy(policy, _src(chat_id="on")) == {"mode": "idle", "idle_minutes": 60}
+    assert plugin._time_reset_reason(plugin._scoped_policy(policy, _src()), _last(1000), NOW) is None
+
+
+def test_scoped_policy_does_not_mutate_shared_config(plugin):
+    import copy
+    before = copy.deepcopy(_SCOPED)
+    plugin._scoped_policy(_SCOPED, _src(chat_id="late", scope_id="g1"))
+    assert _SCOPED == before
+
+
+def test_maybe_reset_channel_none_blocks_top_level_reset(plugin, tmp_path):
+    """Top level would reset (idle, 2 h past a 60 min threshold); the channel says none."""
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=120)
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    policy = {"mode": "idle", "idle_minutes": 60, "channels": {"test-chat": {"mode": "none"}}}
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=policy):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    assert store.lookup_by_session_key(key).session_id == "seed-sid"
+
+
+def test_maybe_reset_channel_enables_reset(plugin, tmp_path, hook_recorder):
+    """Top level is off; the channel turns idle reset on and the route rotates."""
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=120)
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    policy = {"mode": "none", "channels": {"test-chat": {"mode": "idle", "idle_minutes": 60}}}
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=policy):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    assert store.lookup_by_session_key(key).session_id != "seed-sid"

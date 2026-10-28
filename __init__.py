@@ -104,6 +104,13 @@ the same route, text only (no tool calls or output), length-capped, redacted,
 in memory only; skipped when the last user activity is older than
 ``max_age_hours``. See the README for the keys.
 
+Per-channel / per-guild overrides (this fork)
+---------------------------------------------
+``guilds: {<scope id>: {...}}`` and ``channels: {<id>: {...}}`` inside the
+``session_reset`` block are partial policies merged over the top level, guild
+first, then channel (looked up by ``thread_id``, ``chat_id``, then
+``parent_chat_id``). See :func:`_scoped_policy`.
+
 Compatibility notes
 -------------------
 - Requires Hermes >= v2026.9.11 (needs ``pre_gateway_dispatch`` hook payload
@@ -141,7 +148,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("hermes.plugins.session_reset_policy")
 
-__version__ = "0.4.0"
+__version__ = "0.4.0+nkowne63.1"
 
 _META_KEY = "srp_last_user_inbound"
 
@@ -182,6 +189,44 @@ def _read_session_reset_policy(profile: Optional[str]) -> Optional[Dict[str, Any
     except Exception:
         logger.debug("session_reset policy read failed; skipping", exc_info=True)
         return None
+
+
+_SCOPE_KEYS = ("channels", "guilds")
+
+
+def _scoped_policy(policy: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    """Return *policy* with the ``guilds``/``channels`` override for *source* applied.
+
+    ``session_reset.guilds.<scope id>`` and ``session_reset.channels.<id>`` hold
+    partial policies (any of the top-level keys) that are shallow-merged over the
+    top-level block, guild first, then channel. The channel entry is looked up by
+    the message's ``thread_id``, ``chat_id``, then ``parent_chat_id``, and the first
+    match wins, so a thread follows its own entry when it has one and its parent
+    channel's otherwise. IDs compare as strings (YAML may load them as ints).
+    Non-dict entries are ignored. The input (the shared config cache) is never mutated.
+    """
+    merged = {k: v for k, v in policy.items() if k not in _SCOPE_KEYS}
+
+    def entry(table_key: str, ids: tuple) -> Optional[Dict[str, Any]]:
+        table = policy.get(table_key)
+        if not isinstance(table, dict):
+            return None
+        table = {str(k): v for k, v in table.items()}
+        for raw in ids:
+            if raw is None or raw == "":
+                continue
+            override = table.get(str(raw))
+            if isinstance(override, dict):
+                return override
+        return None
+
+    for override in (
+        entry("guilds", (getattr(source, "scope_id", None) or getattr(source, "guild_id", None),)),
+        entry("channels", tuple(getattr(source, name, None) for name in ("thread_id", "chat_id", "parent_chat_id"))),
+    ):
+        if override:
+            merged.update({k: v for k, v in override.items() if k not in _SCOPE_KEYS})
+    return merged
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
@@ -441,6 +486,7 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
     policy = _read_session_reset_policy(profile)
     if not policy:
         return None
+    policy = _scoped_policy(policy, source)
     key = _resolve_session_key(gateway, source, session_key)
     entry = _lookup_entry(session_store, key)
     if key is None or entry is None:
