@@ -1,0 +1,14 @@
+name: discord-extensions
+label: Discord Extensions
+kind: platform
+version: 0.1.0
+description: >
+  The bundled Discord adapter with two additions, registered under the platform name
+  `discord` (supersedes the bundled registration while enabled; unloading restores it).
+  (1) discord.guild_defaults / category_defaults / channel_defaults: per-scope
+  require_mention and thread_response (channel > category > guild > global), and
+  no_thread_channels matching a category ID. (2) A reply into an auto-thread that targets
+  the thread starter names the parent channel, and only reference-shaped Discord errors
+  (10008, 50035 on message_reference) retry as a plain send. Replaces
+  nkowne63/hermes-agent fork commits 57d2d5b2c2 and e8e420baae.
+author: nkowne63
