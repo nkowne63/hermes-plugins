@@ -71,9 +71,9 @@ def home(tree, tmp_path, monkeypatch):
     (hermes_home / "plugins").mkdir(parents=True)
     (hermes_home / "plugins" / PLUGIN_KEY).symlink_to(PLUGIN_DIR, target_is_directory=True)
 
-    def configure(always_loaded=None, *, core: bool = False):
+    def configure(always_loaded=None, *, core: bool = False, extra: dict | None = None):
         skills = {} if always_loaded is None else {"always_loaded": always_loaded}
-        cfg = {"skills": skills, "plugins": {"enabled": [PLUGIN_KEY]}}
+        cfg = {**(extra or {}), "skills": skills, "plugins": {"enabled": [PLUGIN_KEY]}}
         (hermes_home / "config.yaml").write_text(json.dumps(cfg), encoding="utf-8")  # JSON is valid YAML
         if not core:
             import agent.agent_init as agent_init
@@ -97,13 +97,20 @@ def _chat_response(content="ok"):
     return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], model="m", usage=None)
 
 
-def _system_sent(agent, user_message="hi") -> str:
-    """Run one real turn and return the system message the provider would have received."""
+def _codex_response(text="ok"):
+    return SimpleNamespace(
+        output=[SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text=text)])],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=3, total_tokens=8), status="completed", model="m")
+
+
+def _first_request(agent, user_message="hi") -> dict:
+    """Run one real turn and return the provider kwargs of its first API call."""
     captured: list[dict] = []
+    responses_api = agent.api_mode == "codex_responses"
 
     def _capture(api_kwargs):
         captured.append(api_kwargs)
-        return _chat_response()
+        return _codex_response() if responses_api else _chat_response()
 
     agent._interruptible_api_call = _capture
     agent._disable_streaming = True
@@ -113,7 +120,15 @@ def _system_sent(agent, user_message="hi") -> str:
     result = agent.run_conversation(user_message)
     assert result.get("completed") is True, result
     assert captured, "no API call was made"
-    first = captured[0]["messages"][0]
+    return captured[0]
+
+
+def _system_sent(agent, user_message="hi") -> str:
+    """The system text a real turn sends: ``instructions`` on the Responses API, else the system message."""
+    request = _first_request(agent, user_message)
+    if agent.api_mode == "codex_responses":
+        return request["instructions"]
+    first = request["messages"][0]
     assert first["role"] == "system"
     content = first["content"]
     return content if isinstance(content, str) else "\n\n".join(p.get("text", "") for p in content)
@@ -323,3 +338,69 @@ class TestEveryAgentGetsIt:
             assert BODY not in system and "skill preloaded" not in system
         finally:
             agent.close()
+
+
+# --- the rpi's runtime: openai-codex main model and delegation, api_mode unset ----------------------
+
+_RPI_LIKE = {
+    "model": {"provider": "openai-codex", "default": "gpt-6.1-sol"},
+    "delegation": {"provider": "openai-codex", "model": "gpt-6-luna"},
+    "fallback_providers": [{"provider": "anthropic", "model": "claude-sonnet-4.6"}],
+}
+
+
+@pytest.fixture
+def rpi_like(home, monkeypatch):
+    """rpi-like config (no ``model.openai_runtime``) with a stub Codex OAuth login, so the REAL runtime
+    ladder resolves openai-codex (CLI/gateway startup and delegation.provider both go through it)."""
+    home(["pinned-skill"], extra=_RPI_LIKE)
+    import hermes_cli.runtime_provider as rp
+    monkeypatch.setattr(rp, "resolve_codex_runtime_credentials",
+                        lambda *a, **k: {"api_key": "codex-token", "base_url": rp.DEFAULT_CODEX_BASE_URL})
+    runtime = rp.resolve_runtime_provider(requested="openai-codex", target_model="gpt-6.1-sol")
+    assert runtime["provider"] == "openai-codex" and runtime["api_key"] == "codex-token"
+    return runtime
+
+
+def _codex_agent(runtime, **kw):
+    from run_agent import AIAgent
+    return AIAgent(**{**_AGENT_KW, "provider": runtime["provider"], "base_url": runtime["base_url"],
+                      "api_key": runtime["api_key"], "api_mode": None, "model": "gpt-6.1-sol", **kw})
+
+
+class TestRpiOpenAICodex:
+    def test_runtime_is_codex_responses_not_app_server(self, rpi_like):
+        # codex_app_server is opt-in only (model.openai_runtime: codex_app_server); unset -> Responses API,
+        # which runs the agent loop and therefore the llm_request middleware.
+        assert rpi_like["api_mode"] == "codex_responses"
+
+    def test_top_level_codex_agent_gets_it_in_instructions(self, rpi_like):
+        agent = _codex_agent(rpi_like)  # api_mode unset, as on the rpi
+        try:
+            assert agent.api_mode == "codex_responses"
+            assert _system_sent(agent).count(BODY) == 1
+        finally:
+            agent.close()
+
+    def test_codex_delegate_child_gets_it_in_instructions(self, rpi_like, monkeypatch):
+        from tools import delegate_tool as dt
+        monkeypatch.setattr(dt, "_build_child_system_prompt", lambda *_a, **_kw: "DELEGATE CHILD PROMPT")
+        parent = _codex_agent(rpi_like, session_id="parent")
+        try:
+            # delegate_task's own routing: delegation.provider/model from the real config, credentials through
+            # the real runtime resolver, then the same _build_child_agent kwargs _build_children passes.
+            routes, err = dt._routes_for([{"goal": "CHILD GOAL"}], dt._load_config(), None, parent)
+            assert err is None and not routes[0].error, (err, routes)
+            route = routes[0]
+            child = dt._build_child_agent(task_index=0, goal="CHILD GOAL", context=None, toolsets=["file"],
+                                          model=route.creds["model"], max_iterations=4, task_count=1,
+                                          parent_agent=parent, **dt._route_overrides(route))
+            try:
+                assert (child.provider, child.model, child.api_mode) == ("openai-codex", "gpt-6-luna", "codex_responses")
+                assert child.skip_context_files is True
+                system = _system_sent(child, "CHILD GOAL")
+                assert system.count(BODY) == 1 and "DELEGATE CHILD PROMPT" in system
+            finally:
+                child.close()
+        finally:
+            parent.close()
