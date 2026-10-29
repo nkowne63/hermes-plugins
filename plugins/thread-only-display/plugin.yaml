@@ -1,0 +1,13 @@
+name: hermes-thread-only-display
+label: Thread-Only Display
+kind: standalone
+version: 0.1.0
+description: >
+  display.thread_only_channels: in a listed channel (not a thread under it) a turn shows only
+  the final answer — tool progress (except `log`), interim assistant messages, thinking progress
+  and the prepended show_reasoning block are suppressed. Wraps the gateway's
+  _run_agent_display_settings / _hmwa_prepend_reasoning, installed only in a gateway process.
+  Replaces nkowne63/hermes-agent fork commit 5327a5da17.
+author: nkowne63
+provides_hooks:
+  - pre_gateway_dispatch
