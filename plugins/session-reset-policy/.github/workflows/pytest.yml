@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # The integration tests import the real gateway SessionStore/SessionEntry
+  # and bind the real /new reset funnel (GatewaySessionCommandsMixin).
+  # Pinned to hermes-agent main as of 2026-09-27 (9a0a1625); the full suite
+  # was re-run locally against this tree. Bump deliberately and re-run
+  # locally against the new tree before moving it.
+  HERMES_REF: 9a0a1625367242596d338ae2da541c4a1fc785a2
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Fetch pinned Hermes tree
+        # tests/test_session_reset_policy.py resolves the tree at
+        # ~/.hermes/hermes-agent; tests skip (not fail) if it is absent.
+        # actions/checkout fetches WITH the workflow token — the previous
+        # anonymous `git clone` kept hitting GitHub's unauthenticated rate
+        # limit (HTTP 429) and failing whole runs on this step.
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_REF }}
+          path: hermes-agent-src
+          fetch-depth: 1
+
+      - name: Place Hermes tree at ~/.hermes/hermes-agent
+        run: |
+          mkdir -p ~/.hermes
+          mv "$GITHUB_WORKSPACE/hermes-agent-src" ~/.hermes/hermes-agent
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run test suite
+        # Deliberately no PYTHONPATH for the plugin checkout itself: the
+        # standalone-suite discipline is that collection must work without
+        # Hermes imports. The hermes tree enters sys.path lazily inside the
+        # real-store tests only.
+        run: python -m pytest tests/ -q
