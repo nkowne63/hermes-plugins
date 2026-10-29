@@ -19,7 +19,7 @@ if [ ! -d "$tree/.git" ]; then
   git -C "$tree" checkout -q "$HERMES_REF"
 fi
 venv="$cache/venv-$HERMES_REF"
-if [ ! -f "$venv/.deps-installed" ]; then
+if [ ! -f "$venv/.deps-installed" ] || ! "$venv/bin/python" -V >/dev/null 2>&1; then
   rm -rf "$venv"
   uv venv -q --python 3.14 "$venv"
   # The tree's uv.lock is the complete, already-resolved set (its overrides included), so install it as is
