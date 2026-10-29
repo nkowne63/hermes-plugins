@@ -8,7 +8,7 @@ version: 2026.10.29
 plugins:
   - repo: nkowne63/hermes-plugins
     subdir: plugins/session-reset-policy
-    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+    ref: b2b0f488d15cf8c6a07bd8d887accbfdd5d89198
   - repo: nkowne63/hermes-plugins
     subdir: plugins/always-loaded-skills
     ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
