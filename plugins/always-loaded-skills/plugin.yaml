@@ -1,0 +1,14 @@
+name: always-loaded-skills
+label: Always-Loaded Skills
+kind: standalone
+version: 0.1.0
+description: >
+  skills.always_loaded as a plugin: the full SKILL.md of every skill listed under
+  skills.always_loaded (list, or comma/newline-separated string) is added to the system
+  prompt of EVERY agent's model calls — CLI, gateway, TUI, cron, delegate_task children
+  and internal forks — whether or not the skills toolset is enabled (skills.auto_load
+  skips delegate children and toolset-less agents). Implemented as llm_request
+  middleware: blocks are rendered once per session and appended to the request's system
+  message; a skill already present as a preloaded/auto-loaded block is not added again.
+  Missing or disabled names are skipped with one warning per profile home and name set.
+author: nkowne63
