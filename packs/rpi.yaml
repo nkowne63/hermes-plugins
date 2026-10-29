@@ -23,4 +23,4 @@ plugins:
     ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
   - repo: nkowne63/hermes-plugins
     subdir: plugins/devin
-    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+    ref: 4c87bfe3414bdbdbd38d8d9f1a3cda217b917f91
