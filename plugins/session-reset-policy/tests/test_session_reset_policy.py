@@ -489,6 +489,86 @@ def test_maybe_reset_stamps_clock_when_within_threshold(plugin, tmp_path):
     assert stamp is not None
     assert datetime.fromisoformat(stamp) >= before
 
+def _stamp_calls(plugin, store, key, policy, times=1):
+    """Run the hook *times*; return the clock-stamp writes it made."""
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=policy), \
+            mock.patch.object(store, "set_session_metadata",
+                              wraps=store.set_session_metadata) as spy:
+        for _ in range(times):
+            assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    return [c for c in spy.call_args_list if c.args[1] == "srp_last_user_inbound"]
+
+def test_maybe_reset_stamp_throttled_within_interval(plugin, tmp_path):
+    """Every stamp rewrites the whole gateway_routing table in state.db: consecutive
+    messages within the throttle interval persist it once."""
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=5)
+    policy = {"mode": "idle", "idle_minutes": 240}
+    assert len(_stamp_calls(plugin, store, key, policy, times=3)) == 1
+    assert store.lookup_by_session_key(key).session_id == "seed-sid"
+
+def test_maybe_reset_stamp_skipped_keeps_stored_value(plugin, tmp_path):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=5)
+    stored = (datetime.now() - timedelta(seconds=30)).isoformat()
+    store.set_session_metadata(key, "srp_last_user_inbound", stored)
+    policy = {"mode": "idle", "idle_minutes": 240}
+    assert _stamp_calls(plugin, store, key, policy) == []
+    assert store.get_session_metadata(key, "srp_last_user_inbound") == stored
+
+def test_maybe_reset_stamp_rewritten_after_interval(plugin, tmp_path):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=5)
+    stored = datetime.now() - timedelta(seconds=61)
+    store.set_session_metadata(key, "srp_last_user_inbound", stored.isoformat())
+    policy = {"mode": "idle", "idle_minutes": 240}
+    assert len(_stamp_calls(plugin, store, key, policy)) == 1
+    stamp = datetime.fromisoformat(store.get_session_metadata(key, "srp_last_user_inbound"))
+    assert stamp > stored + timedelta(seconds=60)
+    assert store.lookup_by_session_key(key).session_id == "seed-sid"
+
+@pytest.mark.parametrize("stored", ["not-a-date", "FUTURE"])
+def test_maybe_reset_stamp_rewritten_when_unparsable_or_future(plugin, tmp_path, stored):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=5)
+    if stored == "FUTURE":  # clock stepped back: the stamp must not freeze the clock
+        stored = (datetime.now() + timedelta(minutes=10)).isoformat()
+    store.set_session_metadata(key, "srp_last_user_inbound", stored)
+    policy = {"mode": "idle", "idle_minutes": 240}
+    assert len(_stamp_calls(plugin, store, key, policy)) == 1
+
+def test_maybe_reset_stamp_interval_shrinks_for_short_pauses(plugin, tmp_path):
+    """A 1-minute idle policy re-stamps after 0.6 s, so a cut lands at most 1% early."""
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=0.5)
+    store.set_session_metadata(key, "srp_last_user_inbound",
+                               (datetime.now() - timedelta(seconds=2)).isoformat())
+    policy = {"mode": "idle", "idle_minutes": 1}
+    assert len(_stamp_calls(plugin, store, key, policy)) == 1
+
+@pytest.mark.parametrize("policy, seconds", [
+    ({"mode": "idle", "idle_minutes": 240}, 60),
+    ({"mode": "idle", "idle_minutes": 30}, 18),
+    ({"mode": "both", "idle_minutes": 240, "at_hour": 4, "daily_min_idle_minutes": 10}, 6),
+    ({"mode": "daily", "at_hour": 4}, 60),
+    ({"mode": "daily", "at_hour": 4, "idle_minutes": 1}, 60),  # idle inactive in daily mode
+    ({"mode": "idle", "idle_minutes": "bad"}, 60),
+])
+def test_stamp_interval(plugin, policy, seconds):
+    assert plugin._stamp_interval(policy) == timedelta(seconds=seconds)
+
+def test_maybe_reset_idle_boundary_unaffected_by_throttle(plugin, tmp_path, hook_recorder):
+    """A stored stamp past the idle threshold still resets, exactly as before."""
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=1)
+    store.set_session_metadata(key, "srp_last_user_inbound",
+                               (datetime.now() - timedelta(minutes=60, seconds=1)).isoformat())
+    policy = {"mode": "idle", "idle_minutes": 60}
+    _stamp_calls(plugin, store, key, policy)
+    assert store.lookup_by_session_key(key).session_id != "seed-sid"
+
 def test_maybe_reset_deferral_does_not_advance_clock(plugin, tmp_path):
     """Boundary past + turn in flight: defer AND leave the clock alone, so the
     next message re-evaluates the same boundary."""

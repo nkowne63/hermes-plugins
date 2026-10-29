@@ -220,6 +220,14 @@ Restart the gateway afterwards.
   agent to know.
 - A turn in flight is never reset; the clock is left untouched and the reset
   re-arms on the next message.
+- The clock stamp is throttled (this fork): advancing it rewrites Hermes'
+  whole `gateway_routing` table in `state.db`, so it is skipped while the
+  stored stamp is younger than 60 s — or 1% of the shortest configured pause
+  (`idle_minutes`, `daily_min_idle_minutes`) when that is shorter — and always
+  written when missing, unparsable or in the future. The stored stamp is never
+  newer than the real last message, so this never delays a cut; the daily cut
+  stays exact, and an idle / minimum-pause cut can land at most that interval
+  early.
 - Boundary hooks keep firing downstream (`session:end`/`session:reset`,
   `on_session_finalize`/`on_session_reset`) — the reset goes through the /new
   funnel, not around it.

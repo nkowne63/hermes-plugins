@@ -82,6 +82,27 @@ Deferral semantics: when the boundary is past but a turn is in flight, the
 clock is NOT advanced, so the next message re-evaluates the same boundary
 against the same last-user-inbound time.
 
+Clock-stamp throttle (this fork)
+--------------------------------
+Advancing the clock persists session metadata, which in Hermes core rewrites
+the whole ``gateway_routing`` table in ``state.db`` on the gateway's event
+loop. So the stamp is skipped while the stored one is younger than
+:func:`_stamp_interval` (``_STAMP_MIN_INTERVAL`` = 60 s, shrunk to
+``_STAMP_MAX_FRACTION`` = 1% of the shortest configured pause); it is always
+written when missing, unparsable or in the future. Why that cannot hurt:
+
+- The stored stamp is never newer than the true last activity, so the
+  throttle can never DELAY a cut (every elapsed-time check only sees a larger
+  gap).
+- Daily cut without ``daily_min_idle_minutes`` stays exact: a message past the
+  boundary while the stored stamp predates it is itself cut (and stamped), so
+  "stored < boundary" and "true last < boundary" agree on every message.
+- ``idle_minutes`` / ``daily_min_idle_minutes`` measure the pause from a stamp
+  at most one interval older than the true last message, so such a cut can
+  arrive at most that much early: <= 60 s and <= 1% of the pause (e.g. 0.6 s
+  for a 1-minute idle policy, 60 s for anything >= 100 minutes).
+  Pure-``daily`` policies are unaffected either way.
+
 Daily boundary minimum pause
 ----------------------------
 ``daily_min_idle_minutes`` (default 0: historical behaviour) makes the daily
@@ -148,9 +169,15 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("hermes.plugins.session_reset_policy")
 
-__version__ = "0.4.0+nkowne63.2"
+__version__ = "0.4.0+nkowne63.3"
 
 _META_KEY = "srp_last_user_inbound"
+
+# Clock-stamp throttle (module docstring, "Clock-stamp throttle"): never stamp
+# more often than this, nor more often than this fraction of the shortest
+# configured pause.
+_STAMP_MIN_INTERVAL = timedelta(seconds=60)
+_STAMP_MAX_FRACTION = 0.01
 
 
 def _read_session_reset_policy(profile: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -312,6 +339,47 @@ def _daily_min_idle(policy: Dict[str, Any]) -> float:
             or not math.isfinite(value) or value < 0):
         return 0.0
     return float(value)
+
+
+def _stamp_interval(policy: Dict[str, Any]) -> timedelta:
+    """How long a stored clock stamp may go un-refreshed (see "Clock-stamp throttle").
+
+    ``_STAMP_MIN_INTERVAL``, shrunk to ``_STAMP_MAX_FRACTION`` of the shortest
+    pause the active mode measures (``idle_minutes``, ``daily_min_idle_minutes``),
+    which bounds how early such a cut can land.
+    """
+    interval = _STAMP_MIN_INTERVAL
+    mode = str(policy.get("mode") or "none")
+    pauses = []
+    if mode in ("idle", "both"):
+        idle_minutes = policy.get("idle_minutes")
+        if (isinstance(idle_minutes, (int, float)) and not isinstance(idle_minutes, bool)
+                and math.isfinite(idle_minutes) and idle_minutes > 0):
+            pauses.append(float(idle_minutes))
+    if mode in ("daily", "both"):
+        min_idle = _daily_min_idle(policy)
+        if min_idle > 0:
+            pauses.append(min_idle)
+    for minutes in pauses:
+        interval = min(interval, timedelta(minutes=minutes) * _STAMP_MAX_FRACTION)
+    return interval
+
+
+def _stamp_is_fresh(entry: Any, policy: Dict[str, Any], now: datetime) -> bool:
+    """True when the stored clock stamp is recent enough to skip rewriting it.
+
+    False (write) when there is no stamp, it is unparsable, it lies in the
+    future (clock step back), or it is at least :func:`_stamp_interval` old.
+    """
+    meta = getattr(entry, "metadata", None) or {}
+    stored = _parse_iso(meta.get(_META_KEY)) if isinstance(meta, dict) else None
+    if stored is None:
+        return False
+    try:
+        age = now - stored
+    except TypeError:  # naive vs aware
+        return False
+    return timedelta(0) <= age < _stamp_interval(policy)
 
 
 def _session_in_flight(entry: Any) -> bool:
@@ -497,7 +565,11 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
     reason = _time_reset_reason(policy, last, now, getattr(entry, "created_at", None))
     if reason is None:
         # Not past the boundary: this message IS the user activity — advance
-        # our own clock (never ``updated_at``; see module docstring).
+        # our own clock (never ``updated_at``; see module docstring), unless the
+        # stored stamp is fresh enough that rewriting it cannot change a decision
+        # (module docstring, "Clock-stamp throttle").
+        if _stamp_is_fresh(entry, policy, now):
+            return None
         try:
             session_store.set_session_metadata(key, _META_KEY, now.isoformat())
         except Exception:
