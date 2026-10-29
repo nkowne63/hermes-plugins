@@ -33,4 +33,6 @@ home="$cache/home-$HERMES_REF"
 mkdir -p "$home/.hermes"
 ln -sfn "$tree" "$home/.hermes/hermes-agent"
 cd "$plugin"
-HOME="$home" exec "$venv/bin/python" -m pytest tests -q "$@"
+# HERMES_DISABLE_LAZY_INSTALLS: importing gateway modules otherwise lets hermes_bootstrap re-exec the interpreter
+# into another environment, which silently kills the pytest process mid-run.
+HOME="$home" HERMES_DISABLE_LAZY_INSTALLS=1 exec "$venv/bin/python" -m pytest tests -q "$@"
