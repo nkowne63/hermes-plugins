@@ -1,0 +1,26 @@
+# Plugins the rpi Hermes runs. Every ref is an exact commit of this repo (Hermes requires 40-char SHAs).
+# Install / update: scripts/install-pack.sh packs/rpi.yaml (non-interactive, per-plugin pinned installs),
+# or interactively: hermes plugins pack install packs/rpi.yaml
+name: rpi
+description: nkowne63 rpi Hermes plugin set (replaces fork commits; see README)
+author: nkowne63
+version: 2026.10.29
+plugins:
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/session-reset-policy
+    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/always-loaded-skills
+    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/channel-silence
+    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/thread-only-display
+    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/discord-extensions
+    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/devin
+    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7

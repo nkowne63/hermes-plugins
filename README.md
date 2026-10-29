@@ -12,14 +12,32 @@ Hermes core lives here, so the fork itself only carries changes the plugin API c
 | `hermes-ref.env` | The Hermes tree (repo + commit) every plugin is tested against: the fork main the rpi runs |
 | `packs/rpi.yaml` | Hermes plugin pack for the rpi: each plugin pinned to an exact commit of this repo |
 | `scripts/test-plugin.sh <name>` | Runs a plugin's tests against `hermes-ref.env` (same as CI) |
+| `scripts/install-pack.sh <pack>` | Non-interactive pinned install/update of every plugin in a pack |
 
-## Install one plugin
+## Plugins
+
+| Plugin | What | Config keys | Private Hermes API it depends on |
+|---|---|---|---|
+| `session-reset-policy` | Idle/daily session reset (vendored fork of fastfinge's), per channel/guild, reset notice | `session_reset.*` | — |
+| `always-loaded-skills` | Skills injected into every agent incl. delegate children | `skills.always_loaded` | — (llm_request middleware) |
+| `channel-silence` | Per-channel "silence allowed" | `<platform>.channel_overrides.<id>.allow_silence` | `BasePlatformAdapter._drop_unresolved` |
+| `thread-only-display` | Progress/thinking only inside threads for listed channels | `display.thread_only_channels` | `_run_agent_display_settings`, `_hmwa_prepend_reasoning` |
+| `discord-extensions` | Discord guild/category/channel defaults; auto-thread starter reply references | `discord.{guild,category,channel}_defaults` | Discord adapter internals (see its README) |
+| `devin` | Devin (Cognition) model provider | credentials via `hermes auth add devin` | needs fork commits for PKCE without client_id and the async-client seam |
+
+Every private dependency is checked at startup (one WARNING naming the lost behaviour) and by a test that fails
+when upstream changes it. Still in the fork because no plugin seam exists: per-channel `reasoning_effort`, the
+Astra model-cache fix, and the two core seams `devin` needs.
+
+## Install
 
 ```bash
 hermes plugins install https://github.com/nkowne63/hermes-plugins.git#plugins/<name> --ref <commit> --enable
+scripts/install-pack.sh packs/rpi.yaml          # all of the rpi set, non-interactive
+hermes plugins pack install packs/rpi.yaml      # same, interactive review
 ```
 
-or the whole set (interactive review): `hermes plugins pack install packs/rpi.yaml`.
+Restart the gateway after installing or updating.
 
 ## Following upstream
 
