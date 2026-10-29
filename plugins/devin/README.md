@@ -25,6 +25,12 @@ The model list comes live from your account (`hermes model` → Devin); `adaptiv
 and is resolved to a concrete model per turn. The sign-in token has no refresh grant: when it expires, run
 `hermes auth add devin` again.
 
+`/usage` (and `hermes usage --provider devin`) shows the account's plan and what is left of it, from the
+`GetUserStatus` call the Devin CLI makes at startup: the daily and weekly quota windows (percent left and when
+each resets; shown only when the server dates the window or the plan is quota-billed), credit buckets with a
+monthly grant as percent left until the plan period ends, other credit balances (top-ups) as counts, and any
+overage balance.
+
 | Variable | Meaning |
 |---|---|
 | `DEVIN_API_KEY` | Devin (Cognition) or Windsurf API key. Optional: `hermes auth add devin` signs in through the browser instead. |

@@ -473,6 +473,12 @@ class DevinClient:
                                 status_code=502)
         return assignment
 
+    def get_user_status(self, timeout: Any = None) -> dict[str, Any]:
+        """The account's plan, quota windows and credit balances (``GetUserStatus``): answered by the API server
+        itself to the CLI identity, so it needs no user JWT."""
+        return self._unary("GetUserStatus", self.base_url + wire.GET_USER_STATUS_PATH, wire.GET_USER_STATUS_REQUEST,
+                           {"metadata": wire.cli_metadata(self.api_key)}, wire.GET_USER_STATUS_RESPONSE, timeout)
+
     # ── chat ──
 
     def _create_chat_completion(

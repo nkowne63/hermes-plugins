@@ -35,6 +35,7 @@ wire = importlib.import_module(f"{_PLUGIN_MODULE}.protocol")
 catalog = importlib.import_module(f"{_PLUGIN_MODULE}.catalog")
 transport = importlib.import_module(f"{_PLUGIN_MODULE}.transport")
 devin_auth = importlib.import_module(f"{_PLUGIN_MODULE}.auth")
+devin_usage = importlib.import_module(f"{_PLUGIN_MODULE}.usage")
 
 
 def _jwt(claims: dict) -> str:
@@ -175,6 +176,91 @@ def test_catalog_fetch_uses_discovery_identity_and_caches_routers():
         assert catalog.fetch("k", "https://server.example", http_client=client) is None
     with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(401))) as client:
         assert catalog.fetch("k", "https://server.example", http_client=client) is None
+
+
+# ── account usage (/usage via GetUserStatus) ─────────────────────────────────────────────────────
+
+
+DAY_RESET = int(time.time()) + 3600
+PLAN_END = int(time.time()) + 20 * 86400
+
+
+def _user_status_response(plan_info: dict | None = None, plan_status: dict | None = None, **user) -> bytes:
+    body: dict = {"user_status": {**user, **({"plan_status": plan_status} if plan_status is not None else {})}}
+    if plan_info is not None:
+        body["plan_info"] = plan_info
+    return wire.encode(wire.GET_USER_STATUS_RESPONSE, body)
+
+
+def _serve_usage(monkeypatch, handler) -> None:
+    """Route the profile's own DevinClient (it builds its httpx.Client) to a fake server."""
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: real_client(transport=httpx.MockTransport(handler)))
+
+
+def test_usage_comes_from_get_user_status_through_the_hermes_usage_seam(monkeypatch):
+    from agent.account_usage import fetch_account_usage, render_account_usage_lines
+
+    body = _user_status_response(
+        plan_info={"plan_name": "Devin Pro", "monthly_prompt_credits": 500,
+                   "billing_strategy": wire.BILLING_STRATEGY_QUOTA},
+        plan_status={"plan_end": {"seconds": PLAN_END}, "used_prompt_credits": 125, "available_prompt_credits": 375,
+                     "used_flex_credits": 50, "available_flex_credits": 150, "daily_quota_remaining_percent": 76,
+                     "daily_quota_reset_at_unix": DAY_RESET, "weekly_quota_remaining_percent": 40,
+                     "overage_balance_micros": 2_500_000})
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=gzip.compress(body), headers={"content-type": "application/proto"})
+
+    _serve_usage(monkeypatch, handler)
+    snapshot = fetch_account_usage("devin", base_url="https://server.example", api_key=SESSION_JWT)
+
+    assert [str(r.url) for r in seen] == [
+        "https://server.example/exa.seat_management_pb.SeatManagementService/GetUserStatus"]
+    assert seen[0].headers["content-type"] == "application/proto"
+    meta = wire.decode(wire.GET_USER_STATUS_REQUEST, seen[0].content)["metadata"]
+    assert meta["ide_name"] == "devin-cli" and meta["ide_type"] == "chisel"
+    assert meta["api_key"] == f"devin-session-token${SESSION_JWT}" and "user_jwt" not in meta
+
+    assert snapshot is not None and snapshot.provider == "devin" and snapshot.plan == "Devin Pro"
+    assert [(w.label, w.used_percent) for w in snapshot.windows] == [
+        ("Daily quota", 24.0), ("Weekly quota", 60.0), ("Prompt credits", 25.0)]
+    daily, weekly, prompt = snapshot.windows
+    assert daily.reset_at.timestamp() == DAY_RESET and weekly.reset_at is None
+    assert prompt.reset_at.timestamp() == PLAN_END and prompt.detail == "375 of 500 left"
+    assert snapshot.details == ("Flex credits: 150 available (50 used)", "Overage balance: $2.50")
+    lines = render_account_usage_lines(snapshot)
+    assert lines[1] == "Provider: devin (Devin Pro)"
+    assert lines[2].startswith("Daily quota: 76% remaining (24% used) • resets in ")
+    assert "Weekly quota: 40% remaining (60% used)" in lines and lines[-1] == "Overage balance: $2.50"
+
+
+def test_usage_hides_undated_quota_on_credit_plans_and_falls_back_to_the_tier():
+    snapshot = devin_usage.snapshot(wire.decode(wire.GET_USER_STATUS_RESPONSE, _user_status_response(
+        teams_tier=16,
+        plan_status={"plan_info": {"monthly_flow_credits": 1000, "billing_strategy": 1, "hide_daily_quota": True},
+                     "used_flow_credits": 1200, "daily_quota_reset_at_unix": DAY_RESET})))
+    # Daily is hidden by the plan; weekly is undated on a credit-billed plan (its 0% would read as exhausted).
+    assert snapshot.plan == "Devin Pro" and snapshot.details == ()
+    assert [(w.label, w.used_percent, w.reset_at) for w in snapshot.windows] == [("Flow credits", 100.0, None)]
+
+    empty = devin_usage.snapshot(wire.decode(wire.GET_USER_STATUS_RESPONSE, _user_status_response()))
+    assert empty.windows == () and empty.plan is None and not empty.available and empty.unavailable_reason
+    assert devin_usage.snapshot({}) is None
+
+
+def test_usage_fails_open_without_a_credential_or_on_an_auth_error(monkeypatch):
+    from agent.account_usage import fetch_account_usage
+
+    _serve_usage(monkeypatch, lambda r: httpx.Response(401, json={"code": "unauthenticated", "message": "bad"}))
+    assert fetch_account_usage("devin", base_url="https://server.example", api_key="sk-ws-1") is None
+    with pytest.raises(transport.DevinAPIError) as excinfo:
+        devin_profile.fetch_account_usage(base_url="https://server.example", api_key="sk-ws-1")
+    assert excinfo.value.status_code == 401
+    assert fetch_account_usage("devin") is None  # no env key, no pooled login
+
 
 
 # ── fake Cascade server ──────────────────────────────────────────────────────────────────────────

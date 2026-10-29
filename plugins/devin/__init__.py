@@ -6,7 +6,8 @@ Devin CLI and Windsurf use), so the profile supplies its own client (``transport
 * ``hermes auth add devin`` — the Devin CLI browser login (PKCE, ``auth.py``); the session JWT is pooled.
 * ``DEVIN_API_KEY`` / ``hermes auth add devin --type api-key`` — a Devin or Windsurf API key.
 
-The model roster is account-scoped and comes live from ``GetCliModelConfigs`` (``catalog.py``).
+The model roster is account-scoped and comes live from ``GetCliModelConfigs`` (``catalog.py``); ``/usage`` shows the
+account's plan, quota windows and credit balances from ``GetUserStatus`` (``usage.py``).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from hermes_cli.auth_oauth_pkce_plugin import OAuthPKCEConfig, pkce_auth_handler
 from providers import register_provider
 from providers.base import ProviderProfile
 
-from . import catalog
+from . import catalog, usage
 from . import protocol as wire
 from .auth import AUTHORIZE_URL, REDIRECT_PORT, TOKEN_URL, token_request
 
@@ -82,6 +83,20 @@ class DevinProfile(ProviderProfile):
 
     def get_max_tokens(self, model: str | None) -> int | None:
         return None  # per-model output caps come from the live catalog inside the client
+
+    def fetch_account_usage(self, *, base_url: str | None = None, api_key: str | None = None) -> Any:
+        """``/usage``: the live agent's credential, else the configured one (env key or pool), as a session
+        without an agent would resolve it."""
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        from .transport import DevinClient
+
+        runtime = resolve_runtime_provider(requested=self.name, explicit_base_url=base_url, explicit_api_key=api_key)
+        token = str(runtime.get("api_key") or "").strip()
+        if not token:
+            return None
+        with DevinClient(api_key=token, base_url=runtime.get("base_url") or self.base_url) as client:
+            return usage.snapshot(client.get_user_status(timeout=usage.TIMEOUT_S))
 
 
 register_provider(DevinProfile(

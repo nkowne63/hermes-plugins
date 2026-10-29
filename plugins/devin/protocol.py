@@ -1,9 +1,9 @@
 """Devin (Cognition) wire protocol: Codeium Cascade's Connect RPCs carrying protobuf.
 
 The backend is the Windsurf/Codeium API server (``server.codeium.com``). Unary RPCs (``GetUserJwt``,
-``AssignModel``, ``GetCliModelConfigs``) POST a bare protobuf body (``application/proto``); the chat RPC
-``GetChatMessage`` is Connect server-streaming (``application/connect+proto``): every message rides in a
-5-byte envelope (flag byte + big-endian length) and the stream ends with a JSON trailer frame.
+``AssignModel``, ``GetCliModelConfigs``, ``GetUserStatus``) POST a bare protobuf body (``application/proto``);
+the chat RPC ``GetChatMessage`` is Connect server-streaming (``application/connect+proto``): every message
+rides in a 5-byte envelope (flag byte + big-endian length) and the stream ends with a JSON trailer frame.
 
 Only the fields Hermes reads or writes are declared; unknown fields are skipped on decode. Field numbers
 come from the vendored Codeium descriptors (``exa.*_pb``) the oh-my-pi Devin provider generates from.
@@ -24,6 +24,7 @@ GET_USER_JWT_PATH = "/exa.auth_pb.AuthService/GetUserJwt"
 ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel"
 GET_CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage"
 GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs"
+GET_USER_STATUS_PATH = "/exa.seat_management_pb.SeatManagementService/GetUserStatus"
 
 # The native Devin CLI is a connect-go client; the backend sees the same request identity from Hermes.
 USER_AGENT = "connect-go/1.18.1 (go1.26.3)"
@@ -303,6 +304,24 @@ GET_CLI_MODEL_CONFIGS_RESPONSE = {
     "default_override_model_config": F(3, "message", DEFAULT_OVERRIDE_MODEL_CONFIG),
 }
 
+TIMESTAMP = {"seconds": F(1, "int"), "nanos": F(2, "int")}
+PLAN_INFO = {
+    "teams_tier": F(1, "uint"), "plan_name": F(2, "string"), "monthly_prompt_credits": F(12, "int"),
+    "monthly_flow_credits": F(13, "int"), "monthly_flex_credit_purchase_amount": F(14, "int"),
+    "billing_strategy": F(35, "uint"), "hide_daily_quota": F(36, "bool"), "hide_weekly_quota": F(37, "bool"),
+}
+PLAN_STATUS = {
+    "plan_info": F(1, "message", PLAN_INFO), "plan_end": F(3, "message", TIMESTAMP),
+    "available_flex_credits": F(4, "int"), "used_flow_credits": F(5, "int"), "used_prompt_credits": F(6, "int"),
+    "used_flex_credits": F(7, "int"), "available_prompt_credits": F(8, "int"), "available_flow_credits": F(9, "int"),
+    "daily_quota_remaining_percent": F(14, "int"), "weekly_quota_remaining_percent": F(15, "int"),
+    "overage_balance_micros": F(16, "int"), "daily_quota_reset_at_unix": F(17, "int"),
+    "weekly_quota_reset_at_unix": F(18, "int"),
+}
+USER_STATUS = {"teams_tier": F(10, "uint"), "plan_status": F(13, "message", PLAN_STATUS)}
+GET_USER_STATUS_REQUEST = {"metadata": F(1, "message", METADATA)}
+GET_USER_STATUS_RESPONSE = {"user_status": F(1, "message", USER_STATUS), "plan_info": F(2, "message", PLAN_INFO)}
+
 # Enums.
 SOURCE_USER, SOURCE_SYSTEM, SOURCE_TOOL = 1, 2, 4  # ChatMessageSource (SYSTEM = assistant turns)
 REQUEST_TYPE_CASCADE = 5  # ChatMessageRequestType
@@ -313,6 +332,13 @@ STOP_REASON_CONTENT_FILTER = 11
 DISPLAY_MODEL_ROUTER, DISPLAY_QUICK_REVIEW = 3, 4  # DisplayOption
 DISPLAY_INTERNAL_DEFAULT, DISPLAY_UNCLASSIFIED, DISPLAY_NORMAL = 6, 7, 8  # past the vendored descriptor
 COST_KINDS = frozenset({1, 2})  # ModelDimensionKind COST / COST_FUZZY
+BILLING_STRATEGY_QUOTA = 2  # BillingStrategy (CREDITS = 1, ACU = 3)
+TEAMS_TIERS = {  # TeamsTier
+    1: "TEAMS", 2: "PRO", 3: "ENTERPRISE_SAAS", 4: "HYBRID", 5: "ENTERPRISE_SELF_HOSTED", 6: "WAITLIST_PRO",
+    7: "TEAMS_ULTIMATE", 8: "PRO_ULTIMATE", 9: "TRIAL", 10: "ENTERPRISE_SELF_SERVE", 11: "ENTERPRISE_SAAS_POOLED",
+    12: "DEVIN_ENTERPRISE", 14: "DEVIN_TEAMS", 15: "DEVIN_TEAMS_V2", 16: "DEVIN_PRO", 17: "DEVIN_MAX", 18: "MAX",
+    19: "DEVIN_FREE", 20: "DEVIN_TRIAL",
+}
 
 # ── request identity ─────────────────────────────────────────────────────────────────────────────
 
