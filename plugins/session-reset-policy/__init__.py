@@ -148,7 +148,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("hermes.plugins.session_reset_policy")
 
-__version__ = "0.4.0+nkowne63.1"
+__version__ = "0.4.0+nkowne63.2"
 
 _META_KEY = "srp_last_user_inbound"
 
@@ -540,6 +540,8 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
             logger.debug("session_reset clock stamp failed", exc_info=True)
         if carry_tail and new_sid:
             _arm_carry_over(str(new_sid), str(old_sid), reason, now, carry_tail, carry_cfg)
+        if new_sid:
+            _arm_notice(policy, source, str(new_sid), str(old_sid or ""), reason)
     logger.info(
         "session-reset-policy: reset %s (reason=%s, new session %s)",
         key, reason, new_sid or "?",
@@ -770,9 +772,106 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", _maybe_reset)
     # Optional carry-over: a no-op dict lookup unless a policy reset armed a note.
     ctx.register_hook("pre_llm_call", _carry_over_context)
+    # This fork: the user-visible reset notice on the fresh session's first reply.
+    ctx.register_hook("transform_llm_output", _reset_notice_output)
     logger.info(
-        "session-reset-policy v%s armed (pre_gateway_dispatch, pre_llm_call)", __version__,
+        "session-reset-policy v%s armed (pre_gateway_dispatch, pre_llm_call, transform_llm_output)",
+        __version__,
     )
+
+
+# ---------------------------------------------------------------------------
+# Reset notice (this fork; ``session_reset.notice``)
+# ---------------------------------------------------------------------------
+#
+# A policy reset is otherwise invisible to the user: the chat just carries on
+# with an agent that no longer remembers the previous turns. With the notice on
+# (the default in this fork) the plugin marks the fresh session when IT resets
+# a route, and the ``transform_llm_output`` hook prefixes the first final reply
+# of that session with a short line, so the notice arrives in the same chat
+# message (the gateway edits an already-streamed message to the transformed
+# text). Only resets performed by this plugin (never a typed /new), never on
+# cron/subagent/webhook traffic, once per reset, in memory only.
+
+_NOTICE_DEFAULT_TEXT = "（{reason_ja}ため、新しい会話として始めました）"
+_NOTICE_REASON_JA = {"idle": "一定時間やり取りが無かった", "daily": "日付が変わった"}
+_NOTICE_SKIP_PLATFORMS = frozenset({"cron", "subagent", "webhook"})
+
+_notice_lock = threading.Lock()
+_notice_pending: Dict[str, Dict[str, Any]] = {}
+
+
+class _NoticeFields(dict):
+    """format_map mapping that leaves unknown ``{placeholders}`` as written."""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _notice_config(policy: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The ``notice`` block as ``{"text": ...}``, or None when disabled.
+
+    Default on. ``notice: false`` (or ``{enabled: false}``) turns it off, also per
+    channel/guild through the scoped policy; ``notice: {text: "..."}`` sets the
+    template (``{reason}``, ``{reason_ja}``, ``{previous_session_id}``).
+    """
+    raw = policy.get("notice", True)
+    if raw is True:
+        raw = {}
+    if not isinstance(raw, dict) or raw.get("enabled", True) is not True:
+        return None
+    text = raw.get("text")
+    return {"text": text if isinstance(text, str) and text.strip() else _NOTICE_DEFAULT_TEXT}
+
+
+def _render_notice(template: str, reason: str, old_sid: str) -> str:
+    fields = _NoticeFields(reason=reason, reason_ja=_NOTICE_REASON_JA.get(reason, reason),
+                           previous_session_id=old_sid)
+    try:
+        return template.format_map(fields)
+    except Exception:
+        logger.debug("session-reset-policy: bad notice template; using the default", exc_info=True)
+        return _NOTICE_DEFAULT_TEXT.format_map(fields)
+
+
+def _platform_name(source: Any) -> str:
+    platform = getattr(source, "platform", None)
+    return str(getattr(platform, "value", platform) or "").lower()
+
+
+def _arm_notice(policy: Dict[str, Any], source: Any, new_sid: str, old_sid: str, reason: str) -> None:
+    """Mark *new_sid* for the reset notice after a confirmed policy rotation. Never raises."""
+    try:
+        cfg = _notice_config(policy)
+        platform = _platform_name(source)
+        if cfg is None or platform in _NOTICE_SKIP_PLATFORMS:
+            return
+        stamp = time.monotonic()
+        with _notice_lock:
+            for sid in [s for s, p in _notice_pending.items() if stamp - p["armed"] > _CARRY_PENDING_TTL_S]:
+                _notice_pending.pop(sid, None)
+            _notice_pending[new_sid] = {"text": _render_notice(cfg["text"], reason, old_sid), "armed": stamp}
+    except Exception:
+        logger.debug("session-reset-policy: arming the reset notice failed", exc_info=True)
+
+
+def _reset_notice_output(response_text: Any = None, session_id: str = "", platform: str = "",
+                         **_extra: Any) -> Optional[str]:
+    """transform_llm_output: prefix the fresh session's first reply with the reset notice, once."""
+    if not session_id or not isinstance(response_text, str) or not response_text.strip():
+        return None
+    platform = str(platform or "").lower()
+    if platform in _NOTICE_SKIP_PLATFORMS:
+        return None
+    with _notice_lock:
+        pending = _notice_pending.get(session_id)
+        if pending is None:
+            return None
+        _notice_pending.pop(session_id, None)
+    if time.monotonic() - pending["armed"] > _CARRY_PENDING_TTL_S:
+        return None
+    logger.info("session-reset-policy: reset notice added to the first reply of %s", session_id)
+    return f"{pending['text']}\n\n{response_text}"
 
 
 __all__ = ["register", "__version__"]

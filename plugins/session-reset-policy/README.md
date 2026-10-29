@@ -161,6 +161,39 @@ looked up by the source's `scope_id` (Discord guild, Slack workspace). IDs are
 compared as strings, so quoted and unquoted YAML keys both work. A channel can
 also turn the policy on where the top level has none (`mode` absent or `none`).
 
+### `notice` (this fork)
+
+On by default. When the plugin resets a route (idle or daily; never a typed
+`/new`), the first reply of the fresh session starts with a short line, so the
+user sees in the same chat message (Discord, Telegram, …) that the conversation
+was started over:
+
+```text
+（一定時間やり取りが無かったため、新しい会話として始めました）
+
+<the reply>
+```
+
+It uses the `transform_llm_output` hook, so the notice is part of the stored
+reply (and a streamed message is edited to include it). Once per reset, in
+memory only (dropped after an hour if no reply came), never for cron, subagent
+or webhook traffic.
+
+```yaml
+session_reset:
+  notice:
+    enabled: true                     # default; `notice: false` is the short form
+    text: "（{reason_ja}ため、新しい会話として始めました）"   # default
+  channels:
+    "222222222222222222": { notice: false }   # silent resets in this channel
+```
+
+Template fields: `{reason}` (`idle` / `daily`), `{reason_ja}`
+(一定時間やり取りが無かった / 日付が変わった) and `{previous_session_id}`. A
+malformed template falls back to the default text. Like any other key,
+`notice` can be set per channel or guild (the whole `notice` value is
+replaced, not merged).
+
 ## Install
 
 ```bash

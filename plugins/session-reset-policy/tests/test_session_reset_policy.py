@@ -257,6 +257,7 @@ def test_register_registers_hook(plugin):
     assert ctx.register_hook.call_args_list == [
         mock.call("pre_gateway_dispatch", plugin._maybe_reset),
         mock.call("pre_llm_call", plugin._carry_over_context),
+        mock.call("transform_llm_output", plugin._reset_notice_output),
     ]
 
 
@@ -1285,3 +1286,103 @@ def test_maybe_reset_channel_enables_reset(plugin, tmp_path, hook_recorder):
     with mock.patch.object(plugin, "_read_session_reset_policy", return_value=policy):
         assert _run(plugin._maybe_reset(event, gateway, store)) is None
     assert store.lookup_by_session_key(key).session_id != "seed-sid"
+
+
+# ---------------------------------------------------------------------------
+# Reset notice (``session_reset.notice``, this fork)
+# ---------------------------------------------------------------------------
+
+_IDLE = {"mode": "idle", "idle_minutes": 60}
+
+
+def _policy_reset(plugin, tmp_path, policy, event=None):
+    """Run one policy-evaluated message past a 60 min idle boundary; return the new session id."""
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=120)
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = event or SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=policy):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    return store.lookup_by_session_key(key).session_id
+
+
+def test_notice_prefixes_first_reply_once_after_policy_reset(plugin, tmp_path):
+    new_sid = _policy_reset(plugin, tmp_path, dict(_IDLE))
+    assert new_sid != "seed-sid"
+    out = plugin._reset_notice_output(response_text="こんにちは", session_id=new_sid, platform="telegram")
+    assert out == "（一定時間やり取りが無かったため、新しい会話として始めました）\n\nこんにちは"
+    assert plugin._reset_notice_output(response_text="次", session_id=new_sid, platform="telegram") is None
+
+
+def test_notice_daily_reason_text(plugin):
+    plugin._arm_notice({}, _src(chat_id="c"), "new", "old", "daily")
+    out = plugin._reset_notice_output(response_text="hi", session_id="new", platform="")
+    assert out.startswith("（日付が変わったため、")
+
+
+def test_notice_not_armed_by_typed_new(plugin, tmp_path):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=120)
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=dict(_IDLE)):
+        _run(plugin._maybe_reset(_real_event("/new"), gateway, store))
+    assert plugin._notice_pending == {}
+
+
+def test_notice_not_armed_without_rotation(plugin, tmp_path):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=5)
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=dict(_IDLE)):
+        _run(plugin._maybe_reset(event, gateway, store))
+    assert store.lookup_by_session_key(key).session_id == "seed-sid"
+    assert plugin._notice_pending == {}
+
+
+@pytest.mark.parametrize("override", [False, {"enabled": False}])
+def test_notice_channel_override_off(plugin, tmp_path, override):
+    policy = dict(_IDLE, channels={"test-chat": {"notice": override}})
+    new_sid = _policy_reset(plugin, tmp_path, policy)
+    assert new_sid != "seed-sid"  # the reset itself still happens
+    assert plugin._notice_pending == {}
+    assert plugin._reset_notice_output(response_text="x", session_id=new_sid, platform="telegram") is None
+
+
+def test_notice_template_variables(plugin, tmp_path):
+    policy = dict(_IDLE, notice={"text": "[{reason}/{reason_ja}] prev={previous_session_id} {unknown}"})
+    new_sid = _policy_reset(plugin, tmp_path, policy)
+    out = plugin._reset_notice_output(response_text="body", session_id=new_sid, platform="telegram")
+    assert out == "[idle/一定時間やり取りが無かった] prev=seed-sid {unknown}\n\nbody"
+
+
+def test_notice_bad_template_falls_back_to_default(plugin):
+    assert plugin._render_notice("{0} {", "idle", "old").startswith("（一定時間")
+
+
+@pytest.mark.parametrize("response", [None, 42, ["a"], {"text": "a"}, "", "   "])
+def test_notice_ignores_non_string_or_empty_output_and_stays_armed(plugin, response):
+    plugin._arm_notice({}, _src(chat_id="c"), "new", "old", "idle")
+    assert plugin._reset_notice_output(response_text=response, session_id="new", platform="discord") is None
+    assert "new" in plugin._notice_pending
+
+
+def test_notice_skips_cron_subagent_and_other_sessions(plugin):
+    plugin._arm_notice({}, _src(chat_id="c"), "new", "old", "idle")
+    for platform in ("cron", "subagent", "webhook"):
+        assert plugin._reset_notice_output(response_text="x", session_id="new", platform=platform) is None
+    assert plugin._reset_notice_output(response_text="x", session_id="other", platform="discord") is None
+    assert plugin._reset_notice_output(response_text="x", session_id="new", platform="discord") is not None
+
+
+def test_notice_not_armed_for_non_chat_source_platform(plugin):
+    plugin._arm_notice({}, SimpleNamespace(platform=SimpleNamespace(value="webhook")), "new", "old", "idle")
+    assert plugin._notice_pending == {}
+
+
+def test_notice_expires_when_never_delivered(plugin, monkeypatch):
+    plugin._arm_notice({}, _src(chat_id="c"), "new", "old", "idle")
+    later = plugin.time.monotonic() + plugin._CARRY_PENDING_TTL_S + 1
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: later)
+    assert plugin._reset_notice_output(response_text="x", session_id="new", platform="") is None
+    assert plugin._notice_pending == {}
