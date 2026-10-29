@@ -1,0 +1,15 @@
+name: hermes-channel-silence
+label: Channel Silence
+kind: standalone
+version: 0.1.0
+description: >
+  Per-channel allow_silence: `<platform>.channel_overrides.<id>.allow_silence: true`
+  lets a human turn in that channel (or a thread under it) end on a bare silence
+  marker without the visible ⚠️ fallback. Stamps the inbound event
+  reply_expected=False at adapter ingress (before busy queueing / debounce / burst
+  merges) and in pre_gateway_dispatch, so Hermes' own unaddressed-silence path,
+  queued follow-ups and crash-recovery replay all honor it. Internal turns keep
+  their own verdict. Replaces nkowne63/hermes-agent fork commit c7d91aef35.
+author: nkowne63
+provides_hooks:
+  - pre_gateway_dispatch
