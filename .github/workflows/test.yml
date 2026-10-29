@@ -1,0 +1,34 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.list.outputs.plugins }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: echo "plugins=$(ls -d plugins/*/tests | cut -d/ -f2 | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJson(needs.discover.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Cache Hermes tree and venv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/hermes-plugins
+          key: hermes-${{ hashFiles('hermes-ref.env') }}
+      - name: Test ${{ matrix.plugin }} against hermes-ref.env
+        run: scripts/test-plugin.sh "${{ matrix.plugin }}"
