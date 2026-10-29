@@ -56,10 +56,8 @@ def hermes_home(tmp_path, monkeypatch):
     return home
 
 
-@pytest.fixture
-def plugin():
-    """The plugin registered against a recording ctx; unloaded (wrapper removed) afterwards."""
-    import gateway.platforms.base  # noqa: F401 -- loaded first, as in a gateway process
+def _load_plugin():
+    """A fresh plugin module registered against a recording ctx."""
     spec = importlib.util.spec_from_file_location("hermes_channel_silence", PLUGIN_DIR / "__init__.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -68,9 +66,22 @@ def plugin():
     ctx.on_unload = ctx.unload.append
     module.register(ctx)
     module.ctx = ctx
-    yield module
-    for callback in ctx.unload:
+    return module
+
+
+def _unload(module):
+    for callback in module.ctx.unload:
         callback()
+    module.ctx.unload.clear()
+
+
+@pytest.fixture
+def plugin():
+    """The plugin registered against a recording ctx; unloaded (wrapper removed) afterwards."""
+    import gateway.platforms.base  # noqa: F401 -- loaded first, as in a gateway process
+    module = _load_plugin()
+    yield module
+    _unload(module)
 
 
 def _adapter_cls():
@@ -260,6 +271,66 @@ def test_unload_restores_adapter_gate(plugin):
     plugin.ctx.unload.clear()
     assert not getattr(BasePlatformAdapter._drop_unresolved, "_channel_silence_wrapped", None)
     assert _admit(_event()).reply_expected is None
+
+
+# ── private-gate dependency: a broken seam is reported, never silent ────────────────────────────
+
+GAP_TEXT = "queued follow-ups in allow_silence channels will show the ⚠️ fallback"
+
+
+def _gap_warnings(caplog):
+    return [r for r in caplog.records if r.levelname == "WARNING" and GAP_TEXT in r.getMessage()]
+
+
+@pytest.mark.parametrize("breakage", ["missing", "signature"])
+def test_unusable_adapter_gate_warns_once_and_hook_still_stamps(monkeypatch, caplog, breakage):
+    """Following upstream: if ``_drop_unresolved`` is renamed/removed or its signature changes, the
+    register-time WARNING names the gap, once, and ``pre_gateway_dispatch`` keeps first turns quiet."""
+    import logging
+
+    from gateway.platforms.base import BasePlatformAdapter
+    if breakage == "missing":
+        monkeypatch.delattr(BasePlatformAdapter, "_drop_unresolved")
+    else:
+        monkeypatch.setattr(BasePlatformAdapter, "_drop_unresolved",
+                            lambda self, event, strict=False: False)
+    caplog.set_level(logging.INFO)
+    module = _load_plugin()
+    try:
+        assert len(_gap_warnings(caplog)) == 1
+        (hook,) = module.ctx.hooks["pre_gateway_dispatch"]
+        event = _event()
+        _run(hook(event=event, gateway=None, session_store=None))
+        _run(hook(event=_event(), gateway=None, session_store=None))
+        assert event.reply_expected is False
+        assert len(_gap_warnings(caplog)) == 1
+        assert not getattr(getattr(BasePlatformAdapter, "_drop_unresolved", None),
+                           "_channel_silence_wrapped", None)
+    finally:
+        _unload(module)
+
+
+def test_adapter_base_imported_later_installs_at_first_dispatch(monkeypatch, caplog):
+    """Registered before ``gateway.platforms.base`` was imported: no warning (not a gap); the first
+    ``pre_gateway_dispatch`` installs the wrapper."""
+    import logging
+
+    from gateway.platforms.base import BasePlatformAdapter
+    caplog.set_level(logging.INFO)
+    saved = sys.modules.pop("gateway.platforms.base")
+    try:
+        module = _load_plugin()
+    finally:
+        sys.modules["gateway.platforms.base"] = saved
+    try:
+        assert not _gap_warnings(caplog)
+        assert not getattr(BasePlatformAdapter._drop_unresolved, "_channel_silence_wrapped", None)
+        (hook,) = module.ctx.hooks["pre_gateway_dispatch"]
+        _run(hook(event=_event("loud"), gateway=None, session_store=None))
+        assert getattr(BasePlatformAdapter._drop_unresolved, "_channel_silence_wrapped", None)
+        assert not _gap_warnings(caplog)
+    finally:
+        _unload(module)
 
 
 # ── end to end: no ⚠️ fallback, crash-recovery metadata ──────────────────────────────────────────

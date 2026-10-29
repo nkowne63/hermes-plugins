@@ -22,7 +22,7 @@ Where the stamp happens
    the queued chain drains them inside the running turn), and its silent reply would get the ⚠️.
 2. ``pre_gateway_dispatch`` (the official hook) stamps the event too: it covers events that reach
    the runner without an adapter ingress (producer paths) and is the fallback if the wrapper could
-   not be installed (logged).
+   not be installed — which is logged as a WARNING once, never silent (see README.md).
 
 The config is read from the profile's ``config.yaml`` itself: core ``ChannelOverride.from_dict``
 keeps only the keys it knows, so ``allow_silence`` never reaches ``PlatformConfig``.
@@ -31,6 +31,7 @@ keeps only the keys it knows, so ``allow_silence`` never reaches ``PlatformConfi
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import sys
 from pathlib import Path
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 _BASE_MODULE = "gateway.platforms.base"
 _WRAPPED_MARK = "_channel_silence_wrapped"
 _registrations = 0  # live register() calls (one per profile loading the plugin in this process)
+_DEFERRED = "deferred"  # sentinel: adapter base not imported in this process yet
+_gap_warned = False
 
 
 def _overrides_for(config: Any, platform_key: str) -> dict:
@@ -140,17 +143,43 @@ def _wrap_drop_unresolved(original):
     return _drop_unresolved
 
 
-def _install_adapter_ingress() -> bool:
-    """Wrap ``BasePlatformAdapter._drop_unresolved`` once (idempotent); False when the gateway
-    adapter base is not loaded in this process or lacks the gate."""
+def _install_adapter_ingress() -> Optional[str]:
+    """Wrap ``BasePlatformAdapter._drop_unresolved`` once (idempotent). None when installed,
+    ``_DEFERRED`` when the adapter base is not imported in this process yet, else why the private
+    gate this plugin depends on is unusable (upstream renamed/removed it or changed its signature)."""
     module = sys.modules.get(_BASE_MODULE)
-    base = getattr(module, "BasePlatformAdapter", None) if module is not None else None
-    current = getattr(base, "_drop_unresolved", None) if base is not None else None
-    if current is None:
-        return False
-    if not getattr(current, _WRAPPED_MARK, None):
-        base._drop_unresolved = _wrap_drop_unresolved(current)
-    return True
+    if module is None:
+        return _DEFERRED
+    base = getattr(module, "BasePlatformAdapter", None)
+    if base is None:
+        return f"{_BASE_MODULE}.BasePlatformAdapter is missing"
+    current = getattr(base, "_drop_unresolved", None)
+    if getattr(current, _WRAPPED_MARK, None):
+        return None
+    if not callable(current):
+        return "BasePlatformAdapter._drop_unresolved is missing"
+    try:
+        params = list(inspect.signature(current).parameters)
+    except (TypeError, ValueError):
+        params = None
+    if params != ["self", "event"]:
+        return f"BasePlatformAdapter._drop_unresolved signature changed ({params!r}, expected ['self', 'event'])"
+    base._drop_unresolved = _wrap_drop_unresolved(current)
+    return None
+
+
+def _ensure_adapter_ingress() -> None:
+    """Install the ingress stamp; a gap is logged as a WARNING once per process, never silently."""
+    global _gap_warned
+    problem = _install_adapter_ingress()
+    if problem is None or problem is _DEFERRED or _gap_warned:
+        return
+    _gap_warned = True
+    logger.warning(
+        "channel-silence: adapter ingress stamp NOT installed: %s. Only pre_gateway_dispatch stamps "
+        "now, so queued follow-ups in allow_silence channels will show the ⚠️ fallback "
+        "(messages arriving while a turn runs, merged bursts, steered input). Update the plugin "
+        "for this Hermes version.", problem)
 
 
 def _uninstall_adapter_ingress() -> None:
@@ -167,7 +196,7 @@ async def _pre_gateway_dispatch(event: Any = None, gateway: Any = None, session_
     # The adapter base is loaded by now in a gateway process: install the ingress stamp if the
     # plugin registered before it was imported (a few getattrs once installed).
     if _registrations:
-        _install_adapter_ingress()
+        _ensure_adapter_ingress()
     source = getattr(event, "source", None)
     apply_channel_silence(event, getattr(source, "profile", None))
     return None
@@ -185,10 +214,11 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
     _registrations += 1
     ctx.on_unload(_on_unload)
-    if not _install_adapter_ingress():
+    if sys.modules.get(_BASE_MODULE) is None:
         logger.info(
             "channel-silence: %s not loaded yet; adapter ingress stamp deferred to the first "
             "pre_gateway_dispatch", _BASE_MODULE)
+    _ensure_adapter_ingress()
     logger.info("channel-silence v%s armed", __version__)
 
 
