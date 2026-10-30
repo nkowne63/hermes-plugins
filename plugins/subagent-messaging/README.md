@@ -46,9 +46,9 @@ plugins:
   entries:
     subagent-messaging:
       allow_gateway_injection: true        # required for parent messages to start a turn in a chat session
-      settings:
-        max_parent_messages_per_child: 20  # default 20; further sends tell the child to use its final result
 ```
+
+Messages to the parent are not capped; each one (or each 2 s batch) is a parent turn.
 
 Without `allow_gateway_injection`, Hermes logs `inject_message: gateway injection denied for plugin
 subagent-messaging` and the plugin falls back to steering the parent agent, which an idle parent only reads on its

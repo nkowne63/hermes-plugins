@@ -278,13 +278,14 @@ def test_parent_joining_synchronously_reads_the_message_in_its_current_turn(herm
     assert gateway == []
 
 
-def test_parent_messages_per_child_are_capped(hermes, family, gateway):
-    hermes({"max_parent_messages_per_child": 2})
+def test_parent_messages_are_not_capped(hermes, family, gateway):
+    hermes()
     a = family.child(family.parent("p1"), "GOAL A")
-    assert "delivered" in call(a, "subagent_send", to="parent", message="one")
-    assert "delivered" in call(a, "subagent_send", to="parent", message="two")
-    third = call(a, "subagent_send", to="parent", message="three")
-    assert "error" in third and "final result" in third["error"]
+    for n in range(50):
+        result = call(a, "subagent_send", to="parent", message=f"progress {n}")
+        assert result.get("delivered") == ["parent"], (n, result)
+    assert wait_for(lambda: "progress 49" in "".join(turn["content"] for turn in gateway))
+    assert all(f"progress {n}\n" in "".join(turn["content"] for turn in gateway) for n in range(50))
 
 
 def test_orchestrator_child_reaches_its_own_subagent_parent(hermes, family, gateway, monkeypatch):

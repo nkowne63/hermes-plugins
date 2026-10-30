@@ -1,7 +1,7 @@
 name: subagent-messaging
 label: Subagent Messaging
 kind: standalone
-version: 0.1.0
+version: 0.2.0
 description: >
   Lets running delegate_task subagents talk without finishing. Children get three tools:
   subagent_peers (who am I, my running siblings), subagent_send (to "parent", a sibling id or

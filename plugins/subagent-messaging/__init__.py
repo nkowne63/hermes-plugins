@@ -21,7 +21,6 @@ Delivery
   ``ctx.inject_message(session_key=...)`` (the gateway commits it to the session's durable FIFO, so a busy parent
   gets it right after its current turn). Needs ``plugins.entries.subagent-messaging.allow_gateway_injection:
   true``. Without a route or when injection is refused, the text is steered into the live parent agent instead.
-  ``settings.max_parent_messages_per_child`` (default 20) caps messages to the parent per child.
 
 Seams (private core names; checked at ``register()``, one WARNING per unusable seam):
 ``tools.delegate_tool_registry`` (``_active_subagents``, ``_active_subagents_lock``, ``steer_subagent``),
@@ -43,14 +42,13 @@ import threading
 import time
 from typing import Any, Optional
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 logger = logging.getLogger(__name__)
 
 TOOLSET = "subagent-messaging"
 _TOOL_NAMES = frozenset({"subagent_peers", "subagent_send", "subagent_wait"})
 _PARENT_WINDOW_SECONDS = 2.0  # parent messages inside this window become one parent turn
-_DEFAULT_MAX_PARENT_MESSAGES = 20
 _MAX_MESSAGE_CHARS = 8000
 _DEFAULT_WAIT_SECONDS = 300
 _MAX_WAIT_SECONDS = 1800
@@ -62,8 +60,6 @@ _TOOL_SEARCH = "tools.tool_search"
 _WRAPPED_MARK = "_subagent_messaging_wrapped"
 
 _registrations = 0
-_parent_counts: dict[str, int] = {}  # sender subagent_id -> messages sent to its parent
-_parent_counts_lock = threading.Lock()
 
 
 # --- seams -------------------------------------------------------------------------------------------------------
@@ -285,25 +281,6 @@ def _deliver_parent_batch(batch: dict) -> None:
                    "accepted them and the parent agent is gone)", senders)
 
 
-def _max_parent_messages(ctx: Any) -> int:
-    try:
-        value = int(ctx.get_config("max_parent_messages_per_child", _DEFAULT_MAX_PARENT_MESSAGES))
-    except (TypeError, ValueError):
-        return _DEFAULT_MAX_PARENT_MESSAGES
-    return max(1, value)
-
-
-def _take_parent_slot(sender_id: str, cap: int) -> bool:
-    with _parent_counts_lock:
-        count = _parent_counts.get(sender_id, 0)
-        if count >= cap:
-            return False
-        _parent_counts[sender_id] = count + 1
-        while len(_parent_counts) > 1000:
-            _parent_counts.pop(next(iter(_parent_counts)))
-        return True
-
-
 def _joining(parent: Any, child: Any) -> bool:
     """True while *parent* is synchronously joining *child*: a child stays in the parent's ``_active_children``
     (interrupt fan-out) during a sync join and is detached before a background dispatch."""
@@ -316,9 +293,6 @@ def _joining(parent: Any, child: Any) -> bool:
 
 
 def _send_to_parent(ctx: Any, me: dict, message: str) -> dict:
-    cap = _max_parent_messages(ctx)
-    if not _take_parent_slot(me["subagent_id"], cap):
-        return {"error": f"You already sent {cap} messages to your parent; put anything else in your final result."}
     parent_id = me.get("parent_id")
     if parent_id:  # the parent is itself a subagent (orchestrator) running in this process
         if _registry().steer_subagent(parent_id, _parent_text([(me, message)])):
@@ -455,7 +429,7 @@ def _handle_wait(args: dict, task_id: Any = None, **_kwargs: Any) -> str:
         time.sleep(min(_WAIT_POLL_SECONDS, deadline - now))
 
 
-def _schemas(max_parent: int) -> dict[str, dict]:
+def _schemas() -> dict[str, dict]:
     def schema(name, description, properties=None, required=None):
         params: dict = {"type": "object", "properties": properties or {}, "additionalProperties": False}
         if required:
@@ -471,7 +445,7 @@ def _schemas(max_parent: int) -> dict[str, dict]:
             "subagent_send",
             "Send a message while you keep working (you do not finish). to='parent': your parent gets it as a "
             "new message in its conversation — use it for progress it needs now, a question, or a blocker "
-            f"(at most {max_parent} per task; your final result still reaches it as usual). to=<sibling "
+            "(your final result still reaches it as usual). to=<sibling "
             "subagent_id> or 'siblings': the text is inserted into that sibling's conversation after its current "
             "step. Your parent and siblings reach you the same way: their text appears as an out-of-band "
             "message, sibling ones starting with [SUBAGENT MESSAGE from sibling <id>].",
@@ -512,7 +486,7 @@ def register(ctx: Any) -> None:
     handlers = {"subagent_peers": _handle_peers, "subagent_send": _make_send_handler(ctx),
                 "subagent_wait": _handle_wait}
     emoji = {"subagent_peers": "👥", "subagent_send": "📨", "subagent_wait": "⏳"}
-    for name, schema in _schemas(_max_parent_messages(ctx)).items():
+    for name, schema in _schemas().items():
         ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handlers[name], check_fn=_child_only,
                           description=schema["description"], emoji=emoji[name])
     _registrations += 1
