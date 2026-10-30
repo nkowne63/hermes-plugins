@@ -1,0 +1,13 @@
+name: delegation-no-stall
+label: Delegation No-Stall
+kind: standalone
+version: 0.1.0
+description: >
+  delegate_task children are never stopped for "no progress". Lifts the per-child heartbeat
+  stale verdict (450 s idle / 1200 s in-tool), the background-delegation stall monitor (same
+  limits, force-finalized as "stalled") and, for child turns only, the turn-liveness watchdog
+  (agent.turn_liveness.timeout_s, 600 s). Top-level turns keep their watchdog; explicit stops
+  (delegate_task action=stop, /stop, /new, shutdown) and delegation.child_timeout_seconds are
+  unchanged. A missing or changed core seam is logged as one WARNING naming the check that
+  stays active.
+author: nkowne63
