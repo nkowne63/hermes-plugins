@@ -24,12 +24,15 @@ children of separate `delegate_task` calls. A child cannot address another conve
   appears after the sibling's current step as an out-of-band message starting with
   `[SUBAGENT MESSAGE from sibling <id> (task: …)]`. A sibling that already finished is reported as not running.
 - **To the parent**:
-  - top-level parent: messages to one parent conversation within 2 s are joined into ONE new turn of the parent's
-    chat session (`ctx.inject_message(session_key=…)`; the gateway commits it to the session's durable FIFO, so a
-    busy parent gets it right after its current turn). The text names each sender, its task and the
-    `delegate_task(action="steer", …)` call that answers it. The parent's reply goes to the chat as usual.
-  - when injection is refused or there is no gateway route (CLI, one-shot runs): steered into the live parent
-    agent (lands in its current or next turn).
+  - parent waiting on a synchronous `delegate_task` join (one-shot runs, cron, a full async pool): steered into
+    the parent, which reads it right after its `delegate_task` call returns, in the same turn.
+  - parent of a background delegation (the gateway default): messages to one parent conversation within 2 s are
+    joined into ONE new turn of the parent's session (`ctx.inject_message(session_key=…)`; the gateway commits it
+    to the session's durable FIFO, so a busy parent gets it right after its current turn). The text names each
+    sender, its task and the `delegate_task(action="steer", …)` call that answers it. The parent's reply goes to
+    the chat as usual.
+  - when injection is refused or there is no route: steered into the live parent agent (lands in its current or
+    next turn).
   - parent that is itself a subagent (orchestrator, `delegation.max_spawn_depth >= 2`): steered into it.
 - `subagent_wait` returns as soon as anything is queued for the caller — a sibling message or a parent steer —
   and the message is delivered right after the tool result. While waiting it refreshes the caller's activity
@@ -62,6 +65,7 @@ Checked at `register()`; each unusable seam is logged once:
 | `tools.tool_search.is_deferrable_tool_name(name, defer_tools)` (wrapped) | tools never deferred | tools may sit behind `tool_search` |
 | `tools.async_delegation._records` / `_records_lock` | parent route when the parent agent object was rebuilt | parent reachable only while its agent is in memory |
 | `AIAgent._pending_steer` / `_pending_steer_lock`, `_touch_activity` | `subagent_wait` | read with `getattr`; a renamed slot makes `subagent_wait` run to its timeout |
+| `AIAgent._active_children` / `_active_children_lock` | telling a synchronous join from a background delegation | read with `getattr`; without it a sync-joined parent gets the message as a new turn after its current one |
 
 The plugin needs `plugins.isolation: in_process` (the default).
 

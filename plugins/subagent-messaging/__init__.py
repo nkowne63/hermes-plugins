@@ -13,22 +13,27 @@ Delivery
 - To a sibling: ``tools.delegate_tool_registry.steer_subagent`` — the text lands in the sibling's running turn
   after its current step, exactly like a parent's ``delegate_task(action="steer")``.
 - To the parent when the parent is itself a subagent (orchestrator): the same in-process steer.
-- To a top-level parent: messages to one parent conversation within ``_PARENT_WINDOW_SECONDS`` are joined and
-  sent as ONE new turn of the parent's chat session through ``ctx.inject_message(session_key=...)`` (the gateway
-  commits it to the session's durable FIFO, so a busy parent gets it right after its current turn). Needs
-  ``plugins.entries.subagent-messaging.allow_gateway_injection: true``. Without a gateway route (CLI, sync
-  one-shot runs) or when injection is refused, the text is steered into the live parent agent instead.
+- To a top-level parent that is synchronously joining the sender (one-shot runs, cron, a full async pool; the
+  child is still in the parent's ``_active_children``): steered into the parent, which reads it right after its
+  ``delegate_task`` call returns, in the same turn.
+- To a top-level parent of a background delegation: messages to one parent conversation within
+  ``_PARENT_WINDOW_SECONDS`` are joined and sent as ONE new turn of the parent's session through
+  ``ctx.inject_message(session_key=...)`` (the gateway commits it to the session's durable FIFO, so a busy parent
+  gets it right after its current turn). Needs ``plugins.entries.subagent-messaging.allow_gateway_injection:
+  true``. Without a route or when injection is refused, the text is steered into the live parent agent instead.
   ``settings.max_parent_messages_per_child`` (default 20) caps messages to the parent per child.
 
 Seams (private core names; checked at ``register()``, one WARNING per unusable seam):
 ``tools.delegate_tool_registry`` (``_active_subagents``, ``_active_subagents_lock``, ``steer_subagent``),
 ``tools.registry.no_cache_check_fn`` + ``agent.delegation_context.is_delegated_child_context`` (children-only
 tools), ``tools.tool_search.is_deferrable_tool_name`` (wrapped so these tools are never deferred behind the tool
-search bridge), ``tools.async_delegation._records`` (the parent route when the parent agent object is gone).
+search bridge), ``tools.async_delegation._records`` (the parent route when the parent agent object is gone),
+``AIAgent._active_children`` (sync-join detection).
 """
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib
 import inspect
@@ -299,6 +304,17 @@ def _take_parent_slot(sender_id: str, cap: int) -> bool:
         return True
 
 
+def _joining(parent: Any, child: Any) -> bool:
+    """True while *parent* is synchronously joining *child*: a child stays in the parent's ``_active_children``
+    (interrupt fan-out) during a sync join and is detached before a background dispatch."""
+    children = getattr(parent, "_active_children", None)
+    if children is None:
+        return False
+    lock = getattr(parent, "_active_children_lock", None)
+    with lock if lock is not None else contextlib.nullcontext():
+        return any(c is child for c in children)
+
+
 def _send_to_parent(ctx: Any, me: dict, message: str) -> dict:
     cap = _max_parent_messages(ctx)
     if not _take_parent_slot(me["subagent_id"], cap):
@@ -310,6 +326,9 @@ def _send_to_parent(ctx: Any, me: dict, message: str) -> dict:
         return {"error": f"Your parent {parent_id} is not running any more; put this in your final result."}
     agent = me["agent"]
     parent = _parent_agent(agent)
+    if parent is not None and _joining(parent, agent) and parent.steer(_parent_text([(me, message)])):
+        return {"delivered": ["parent"],
+                "note": "Your parent is waiting on this delegation and reads it as soon as the delegation returns."}
     route = _parent_route(agent, parent)
     if route is None and parent is None:
         return {"error": "Your parent conversation is gone; put this in your final result."}

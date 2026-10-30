@@ -91,12 +91,16 @@ class Family:
         self._agents.append(agent)
         return agent
 
-    def child(self, parent, goal: str, index: int = 0):
+    def child(self, parent, goal: str, index: int = 0, *, background: bool = True):
+        """A running child. ``background`` (the gateway default for a top-level delegate_task) detaches it from
+        the parent as ``_dispatch_background`` does; otherwise the parent is joining it synchronously."""
         from tools import delegate_tool as dt
-        from tools.delegate_tool_child_run import _register_child
+        from tools.delegate_tool_child_run import _detach_child, _register_child
         child = dt._build_child_agent(task_index=index, goal=goal, context=None, toolsets=None, model=None,
                                       max_iterations=4, task_count=1, parent_agent=parent)
         self._agents.append(child)
+        if background:
+            _detach_child(parent, child)
         _register_child(child, parent, goal, owner_session_id=None, owner_transport=None, owner_session_record=None)
         self._registered.append(child)
         return child
@@ -258,6 +262,19 @@ def test_parent_message_falls_back_to_steering_the_parent_without_gateway_inject
     a = family.child(parent, "GOAL A")
     call(a, "subagent_send", to="parent", message="need a decision on the DB")
     assert wait_for(lambda: "need a decision on the DB" in (parent._pending_steer or ""))
+    assert gateway == []
+
+
+def test_parent_joining_synchronously_reads_the_message_in_its_current_turn(hermes, family, gateway):
+    """A synchronous join (one-shot runs, cron, a full async pool) keeps the parent inside its delegate_task call:
+    the message is steered at once so it lands right after the call returns, in the same turn — no extra turn."""
+    hermes()
+    parent = family.parent("p1")
+    a = family.child(parent, "GOAL A", background=False)
+    result = call(a, "subagent_send", to="parent", message="found it early")
+    assert result["delivered"] == ["parent"], result
+    assert "found it early" in (parent._pending_steer or "")
+    time.sleep(0.5)
     assert gateway == []
 
 
