@@ -1,0 +1,17 @@
+name: subagent-messaging
+label: Subagent Messaging
+kind: standalone
+version: 0.1.0
+description: >
+  Lets running delegate_task subagents talk without finishing. Children get three tools:
+  subagent_peers (who am I, my running siblings), subagent_send (to "parent", a sibling id or
+  "siblings") and subagent_wait (block until a message arrives). Sibling messages are steered
+  into the recipient's running turn; parent messages wake the parent's chat session as one
+  turn per short window (plugins.entries.subagent-messaging.allow_gateway_injection: true),
+  falling back to steering the parent agent in-process. The parent answers a child with the
+  stock delegate_task(action="steer"). Tools exist only inside delegate_task children.
+author: nkowne63
+provides_tools:
+  - subagent_peers
+  - subagent_send
+  - subagent_wait
