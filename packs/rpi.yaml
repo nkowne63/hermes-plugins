@@ -29,4 +29,4 @@ plugins:
     ref: 6bb03ec1b59eb0882a22786b065ad5c4a92998d8
   - repo: nkowne63/hermes-plugins
     subdir: plugins/subagent-messaging
-    ref: 6bb03ec1b59eb0882a22786b065ad5c4a92998d8
+    ref: 1eeb927b7e5ca858e92d61a2de78d9802af68ab4
