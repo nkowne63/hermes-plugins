@@ -1466,3 +1466,127 @@ def test_notice_expires_when_never_delivered(plugin, monkeypatch):
     monkeypatch.setattr(plugin.time, "monotonic", lambda: later)
     assert plugin._reset_notice_output(response_text="x", session_id="new", platform="") is None
     assert plugin._notice_pending == {}
+
+
+# Message 1567086494626091009 (Discord, allow_silence nutrition-log channel, 2026-11-03 17:02 JST): the first
+# reply after a daily reset was a bare silence marker, and the delivered message read
+# "（日付が変わったため、新しい会話として始めました）\n\n[SILENT]". The prefixed marker was no longer a bare
+# marker, so the gateway neither recognised it as silence nor hid it. Chosen behaviour: post the notice alone.
+_DAILY_NOTICE = "（日付が変わったため、新しい会話として始めました）"
+
+
+def _discord_source():
+    return SimpleNamespace(platform=SimpleNamespace(value="discord"), chat_id="1509077323490791515",
+                           thread_id=None, parent_chat_id=None, scope_id="864162581601714236")
+
+
+@pytest.mark.parametrize("reply", ["[SILENT]", "NO_REPLY", "  [SILENT]\n", "silent.", "[静默]"])
+def test_notice_on_silent_reply_is_posted_alone(plugin, reply):
+    filters = _import_tree_module("gateway.response_filters")
+    assert filters.is_intentional_silence_response(reply)  # the core reads the raw reply as silence
+    plugin._arm_notice({"mode": "daily", "at_hour": 4}, _discord_source(), "new", "old", "daily")
+
+    out = plugin._reset_notice_output(response_text=reply, session_id="new", platform="discord")
+
+    assert out == _DAILY_NOTICE
+    # What the gateway then delivers (run_turn_persistence: not silence -> strip a closing marker): the notice.
+    assert not filters.is_intentional_silence_response(out)
+    assert filters.strip_trailing_silence_marker(out) == _DAILY_NOTICE
+    assert plugin._notice_pending == {}  # consumed: the next reply is not prefixed
+    assert plugin._reset_notice_output(response_text="次", session_id="new", platform="discord") is None
+
+
+def test_notice_on_silent_reply_after_real_daily_reset(plugin, tmp_path, monkeypatch):
+    """End to end through the hook: a route last used the evening before, a 04:00 daily boundary, the
+    first message of the afternoon (17:02, as in 1567086494626091009), and a bare [SILENT] reply."""
+    _freeze_plugin_now(plugin, monkeypatch, datetime(2026, 11, 3, 17, 2, 15))
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=0)
+    store.set_session_metadata(key, "srp_last_user_inbound", datetime(2026, 11, 2, 21, 0).isoformat())
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value={"mode": "daily", "at_hour": 4}):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    new_sid = store.lookup_by_session_key(key).session_id
+    assert new_sid != "seed-sid"
+    assert plugin._reset_notice_output(response_text="[SILENT]", session_id=new_sid, platform="discord") == _DAILY_NOTICE
+
+
+def test_notice_keeps_prefixing_a_reply_that_only_ends_in_a_marker(plugin):
+    """Not a silent turn: the reply is delivered with the notice; the core strips the closing marker."""
+    filters = _import_tree_module("gateway.response_filters")
+    plugin._arm_notice({}, _discord_source(), "new", "old", "daily")
+    out = plugin._reset_notice_output(response_text="記録しました\n\n[SILENT]", session_id="new", platform="discord")
+    assert out == f"{_DAILY_NOTICE}\n\n記録しました\n\n[SILENT]"
+    assert filters.strip_trailing_silence_marker(out) == f"{_DAILY_NOTICE}\n\n記録しました"
+
+
+# ---------------------------------------------------------------------------
+# Store I/O stays off the gateway event loop (2026-10-31 15:58 stall: the clock stamp's synchronous
+# state.db write ran inside the async pre_gateway_dispatch hook)
+# ---------------------------------------------------------------------------
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _loop_spy(obj, names, calls):
+    """Wrap *names* on *obj* to record ``(name, ran_on_the_event_loop)`` per call."""
+    for name in names:
+        original = getattr(obj, name)
+
+        def spy(*args, __name=name, __original=original, **kwargs):
+            calls.append((__name, _on_event_loop()))
+            return __original(*args, **kwargs)
+
+        setattr(obj, name, spy)
+
+
+def test_clock_stamp_runs_off_the_event_loop(plugin, tmp_path):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=5)
+    calls = []
+    _loop_spy(store, ("lookup_by_session_key", "set_session_metadata"), calls)
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=dict(_IDLE)):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    assert ("set_session_metadata", False) in calls
+    assert [c for c in calls if c[1]] == []
+
+
+def test_policy_reset_store_io_runs_off_the_event_loop(plugin, tmp_path):
+    """Degraded rotation + carry-over capture + end-reason relabel: every store/state.db call in a worker."""
+    store, key, gateway, reads = _carry_store(tmp_path)
+    calls = []
+    _loop_spy(store, ("lookup_by_session_key", "set_session_metadata", "load_transcript", "reset_session"), calls)
+    db = SimpleNamespace(_execute_write=lambda fn: calls.append(("_execute_write", _on_event_loop())))
+    gateway._session_db = db
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=_carry_policy()):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    assert store.lookup_by_session_key(key).session_id != "seed-sid"
+    assert {name for name, _ in calls} >= {"lookup_by_session_key", "set_session_metadata", "load_transcript",
+                                           "reset_session", "_execute_write"}
+    assert [c for c in calls if c[1]] == []
+
+
+def test_funnel_reset_lookups_run_off_the_event_loop(plugin, tmp_path):
+    store = _make_real_store(tmp_path)
+    key, entry = _seed_route(store, updated_minutes_ago=120)
+    calls = []
+    _loop_spy(store, ("lookup_by_session_key", "set_session_metadata"), calls)
+
+    async def funnel(event):
+        store.reset_session(key)
+
+    gateway = SimpleNamespace(_session_key_for_source=lambda src: key, _handle_reset_command=funnel)
+    event = SimpleNamespace(source=_real_source(), internal=False)
+    with mock.patch.object(plugin, "_read_session_reset_policy", return_value=dict(_IDLE)):
+        assert _run(plugin._maybe_reset(event, gateway, store)) is None
+    assert store.lookup_by_session_key(key).session_id != "seed-sid"
+    assert [c for c in calls if c[1]] == []

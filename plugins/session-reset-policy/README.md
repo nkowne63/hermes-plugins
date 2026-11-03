@@ -177,7 +177,10 @@ was started over:
 It uses the `transform_llm_output` hook, so the notice is part of the stored
 reply (and a streamed message is edited to include it). Once per reset, in
 memory only (dropped after an hour if no reply came), never for cron, subagent
-or webhook traffic.
+or webhook traffic. When that first reply is a bare silence marker
+(`[SILENT]`, `NO_REPLY`, … — the gateway's own exact-marker test), the notice
+is posted alone: prefixing the marker would turn it into visible text the
+gateway no longer treats as silence.
 
 ```yaml
 session_reset:
@@ -220,6 +223,10 @@ Restart the gateway afterwards.
   agent to know.
 - A turn in flight is never reset; the clock is left untouched and the reset
   re-arms on the next message.
+- Store and `state.db` calls (route lookups, the clock stamp, the carry-over
+  transcript read, the degraded rotation, the end-reason relabel) run in a
+  worker thread (`asyncio.to_thread`, as Hermes' own `AsyncSessionStore`
+  does), never on the gateway's event loop.
 - The clock stamp is throttled (this fork): advancing it rewrites Hermes'
   whole `gateway_routing` table in `state.db`, so it is skipped while the
   stored stamp is younger than 60 s — or 1% of the shortest configured pause

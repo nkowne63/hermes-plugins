@@ -85,8 +85,13 @@ against the same last-user-inbound time.
 Clock-stamp throttle (this fork)
 --------------------------------
 Advancing the clock persists session metadata, which in Hermes core rewrites
-the whole ``gateway_routing`` table in ``state.db`` on the gateway's event
-loop. So the stamp is skipped while the stored one is younger than
+the whole ``gateway_routing`` table in ``state.db``. Every store/``state.db``
+call this hook makes (route lookups, the stamp, the carry-over transcript
+read, the degraded rotation, the end-reason relabel) runs in a worker thread
+(``asyncio.to_thread``, the core's own ``AsyncSessionStore`` boundary: the
+store is thread-safe), never on the gateway's event loop — a slow SD-card
+write there stalled every platform (2026-10-31). The stamp is still skipped
+while the stored one is younger than
 :func:`_stamp_interval` (``_STAMP_MIN_INTERVAL`` = 60 s, shrunk to
 ``_STAMP_MAX_FRACTION`` = 1% of the shortest configured pause); it is always
 written when missing, unparsable or in the future. Why that cannot hurt:
@@ -156,6 +161,7 @@ Compatibility notes
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import inspect
@@ -169,7 +175,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("hermes.plugins.session_reset_policy")
 
-__version__ = "0.4.0+nkowne63.3"
+__version__ = "0.4.0+nkowne63.4"
 
 _META_KEY = "srp_last_user_inbound"
 
@@ -402,6 +408,21 @@ def _lookup_entry(session_store: Any, session_key: Optional[str]) -> Any:
         return None
 
 
+async def _lookup_entry_async(session_store: Any, session_key: Optional[str]) -> Any:
+    """:func:`_lookup_entry` in a worker thread (the lookup may load the index from ``state.db``)."""
+    if not session_key:
+        return None
+    return await asyncio.to_thread(_lookup_entry, session_store, session_key)
+
+
+async def _stamp_clock(session_store: Any, key: str, now: datetime) -> None:
+    """Persist the user-activity clock in a worker thread. Never raises."""
+    try:
+        await asyncio.to_thread(session_store.set_session_metadata, key, _META_KEY, now.isoformat())
+    except Exception:
+        logger.debug("session_reset clock stamp failed", exc_info=True)
+
+
 def _is_slash_command(event: Any) -> bool:
     """True when *event* is a gateway slash command (``/new``, ``/status``, ...).
 
@@ -470,21 +491,28 @@ def _command_free_event(event: Any) -> Any:
         return _CommandFreeEvent(getattr(event, "source", None))
 
 
-def _reset_via_store(source: Any, session_store: Any, session_key: str) -> Any:
-    """Degraded reset without the gateway funnel: rotate the store and fire what
-    is reachable from the plugin surface — in-flight async delegations end with
-    the old conversation (as in ``/new``), then the ``on_session_finalize`` /
-    ``on_session_reset`` lifecycle hooks report the boundary. No run-generation
-    bump, cached-agent eviction, conversation-scope clear, or gateway
-    ``session:end``/``session:reset`` hooks: those live on the funnel path.
-    """
+def _rotate_via_store(session_store: Any, session_key: str) -> tuple:
+    """Blocking half of the degraded reset (worker thread): delegation interrupt and store rotation.
+    Returns ``(old_sid, new_entry)``."""
     old_entry = _lookup_entry(session_store, session_key)
     old_sid = getattr(old_entry, "session_id", None)
     with contextlib.suppress(Exception):
         from tools.async_delegation import interrupt_for_session
         interrupt_for_session(session_key=session_key, reason="session_reset",
                               parent_session_id=str(old_sid or ""))
-    new_entry = session_store.reset_session(session_key)
+    return old_sid, session_store.reset_session(session_key)
+
+
+async def _reset_via_store(source: Any, session_store: Any, session_key: str) -> Any:
+    """Degraded reset without the gateway funnel: rotate the store and fire what
+    is reachable from the plugin surface — in-flight async delegations end with
+    the old conversation (as in ``/new``), then the ``on_session_finalize`` /
+    ``on_session_reset`` lifecycle hooks report the boundary. No run-generation
+    bump, cached-agent eviction, conversation-scope clear, or gateway
+    ``session:end``/``session:reset`` hooks: those live on the funnel path.
+    The rotation runs in a worker thread; the lifecycle hooks on the caller's loop.
+    """
+    old_sid, new_entry = await asyncio.to_thread(_rotate_via_store, session_store, session_key)
     new_sid = getattr(new_entry, "session_id", None) if new_entry is not None else None
     try:
         from hermes_cli.lifecycle import invoke_hook
@@ -505,16 +533,16 @@ async def _reset_session(gateway: Any, event: Any, source: Any, session_store: A
     """
     funnel = getattr(gateway, "_handle_reset_command", None)
     if callable(funnel):
-        old_sid = getattr(_lookup_entry(session_store, session_key), "session_id", None)
+        old_sid = getattr(await _lookup_entry_async(session_store, session_key), "session_id", None)
         try:
             outcome = funnel(_command_free_event(event))
             if inspect.isawaitable(outcome):
                 await outcome
-            return _lookup_entry(session_store, session_key)
+            return await _lookup_entry_async(session_store, session_key)
         except Exception:
             # Failure AFTER the rotation (e.g. banner/tip bookkeeping in the
             # funnel's tail) must not rotate a second time.
-            new_entry = _lookup_entry(session_store, session_key)
+            new_entry = await _lookup_entry_async(session_store, session_key)
             new_sid = getattr(new_entry, "session_id", None)
             if new_entry is not None and new_sid != old_sid:
                 logger.warning(
@@ -528,7 +556,7 @@ async def _reset_session(gateway: Any, event: Any, source: Any, session_store: A
         logger.debug(
             "session-reset-policy: gateway reset funnel not available for %s; using the "
             "degraded store rotation", session_key)
-    return _reset_via_store(source, session_store, session_key)
+    return await _reset_via_store(source, session_store, session_key)
 
 
 async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
@@ -556,7 +584,7 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
         return None
     policy = _scoped_policy(policy, source)
     key = _resolve_session_key(gateway, source, session_key)
-    entry = _lookup_entry(session_store, key)
+    entry = await _lookup_entry_async(session_store, key)
     if key is None or entry is None:
         return None  # no key or no route yet -> brand-new conversation anyway
 
@@ -570,10 +598,7 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
         # (module docstring, "Clock-stamp throttle").
         if _stamp_is_fresh(entry, policy, now):
             return None
-        try:
-            session_store.set_session_metadata(key, _META_KEY, now.isoformat())
-        except Exception:
-            logger.debug("session_reset clock stamp failed", exc_info=True)
+        await _stamp_clock(session_store, key, now)
         return None
     if _session_in_flight(entry):
         logger.info(
@@ -585,7 +610,8 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
     old_sid = getattr(entry, "session_id", None)
     carry_cfg = _carry_over_config(policy)
     # Read the outgoing transcript BEFORE the rotation; armed only once the rotation is confirmed.
-    carry_tail = _capture_carry_over(session_store, old_sid, last, now, carry_cfg) if carry_cfg else None
+    carry_tail = (await asyncio.to_thread(_capture_carry_over, session_store, old_sid, last, now, carry_cfg)
+                  if carry_cfg else None)
     try:
         new_entry = await _reset_session(gateway, event, source, session_store, key)
     except Exception:
@@ -594,7 +620,7 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
             key, exc_info=True,
         )
         return None
-    _relabel_end_reason(gateway, old_sid, reason)
+    await asyncio.to_thread(_relabel_end_reason, gateway, old_sid, reason)
     new_sid = getattr(new_entry, "session_id", None) if new_entry is not None else None
     if new_entry is not None and new_sid != old_sid:
         # Confirmed rotation (including a funnel that threw after having
@@ -606,10 +632,7 @@ async def _maybe_reset(event: Any, gateway: Any, session_store: Any,
         # stamp the next message re-crosses the same daily boundary and
         # rotates a second time. Only ``srp_last_user_inbound`` is written:
         # unrelated carryover metadata is left alone.
-        try:
-            session_store.set_session_metadata(key, _META_KEY, now.isoformat())
-        except Exception:
-            logger.debug("session_reset clock stamp failed", exc_info=True)
+        await _stamp_clock(session_store, key, now)
         if carry_tail and new_sid:
             _arm_carry_over(str(new_sid), str(old_sid), reason, now, carry_tail, carry_cfg)
         if new_sid:
@@ -864,6 +887,13 @@ def register(ctx: Any) -> None:
 # message (the gateway edits an already-streamed message to the transformed
 # text). Only resets performed by this plugin (never a typed /new), never on
 # cron/subagent/webhook traffic, once per reset, in memory only.
+#
+# A first reply that is a bare silence marker (``[SILENT]``/``NO_REPLY``, as the
+# core's ``is_intentional_silence_response`` reads it) is replaced by the notice
+# alone: prefixing it would turn the marker into visible text the gateway no
+# longer recognises as silence (Discord 1567086494626091009 showed
+# "（日付が変わったため…）\n\n[SILENT]"), and silencing the turn would hide that
+# the conversation restarted.
 
 _NOTICE_DEFAULT_TEXT = "（{reason_ja}ため、新しい会話として始めました）"
 _NOTICE_REASON_JA = {"idle": "一定時間やり取りが無かった", "daily": "日付が変わった"}
@@ -927,9 +957,20 @@ def _arm_notice(policy: Dict[str, Any], source: Any, new_sid: str, old_sid: str,
         logger.debug("session-reset-policy: arming the reset notice failed", exc_info=True)
 
 
+def _is_silence_marker(text: str) -> bool:
+    """The gateway's own exact-marker test; False when the core helper is not importable."""
+    try:
+        from gateway.response_filters import is_intentional_silence_response
+    except Exception:
+        logger.debug("session-reset-policy: silence-marker helper not importable", exc_info=True)
+        return False
+    return bool(is_intentional_silence_response(text))
+
+
 def _reset_notice_output(response_text: Any = None, session_id: str = "", platform: str = "",
                          **_extra: Any) -> Optional[str]:
-    """transform_llm_output: prefix the fresh session's first reply with the reset notice, once."""
+    """transform_llm_output: prefix the fresh session's first reply with the reset notice, once.
+    A bare silence-marker reply becomes the notice alone."""
     if not session_id or not isinstance(response_text, str) or not response_text.strip():
         return None
     platform = str(platform or "").lower()
@@ -942,6 +983,10 @@ def _reset_notice_output(response_text: Any = None, session_id: str = "", platfo
         _notice_pending.pop(session_id, None)
     if time.monotonic() - pending["armed"] > _CARRY_PENDING_TTL_S:
         return None
+    if _is_silence_marker(response_text):
+        logger.info("session-reset-policy: first reply of %s was a silence marker; posting the reset notice alone",
+                    session_id)
+        return pending["text"]
     logger.info("session-reset-policy: reset notice added to the first reply of %s", session_id)
     return f"{pending['text']}\n\n{response_text}"
 
