@@ -30,6 +30,12 @@ def install_into(home: Path) -> Path:
 
 
 _SESSION_HOME = install_into(Path(tempfile.mkdtemp(prefix="devin-plugin-home-")))
+# Provider resolution consults the models.dev registry; on a cold home that is a live download under a 10 s
+# deadline, which a slow link turns into a timeout of the caller (/usage's plugin hook). Point it at a URL
+# requests has no adapter for: the fetch fails at once (no socket, unlike a closed port behind WSL/firewalls)
+# and core falls back to an empty registry, as it does offline.
+(_SESSION_HOME / "config.yaml").write_text('models_dev:\n  url: "file:///nonexistent/models.dev/api.json"\n',
+                                           encoding="utf-8")
 os.environ["HERMES_HOME"] = str(_SESSION_HOME)
 for var in ("DEVIN_API_KEY", "DEVIN_BASE_URL"):
     os.environ.pop(var, None)
