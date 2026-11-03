@@ -1,0 +1,20 @@
+name: discord-status-card
+label: Discord Status Card
+kind: standalone
+version: 0.1.0
+description: >
+  display.status_card_channels: a turn in a Discord thread under a listed channel shows one
+  status card (embed, edited in place, debounced) with state, last event, reasoning/interim
+  excerpt, last tool, tool count and tokens, plus [詳細] (ephemeral full log) and [中断]
+  (/stop for the requester or allowlisted users), instead of per-tool progress messages,
+  interim assistant messages and the long-running heartbeat. Drives the core task-card rail
+  through methods added to the Discord adapter; installed only in a gateway process. A missing
+  or changed core seam is logged as one WARNING naming the lost behaviour (the core display stays).
+author: nkowne63
+provides_hooks:
+  - pre_gateway_dispatch
+  - post_api_request
+  - post_tool_call
+  - on_interim_message
+  - on_session_end
+  - agent_loop_stopped
