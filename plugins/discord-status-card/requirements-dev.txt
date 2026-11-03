@@ -1,3 +1,5 @@
 pytest
 httpx
 pytest-asyncio
+# The card is a discord.py embed + view; the test venv only has Hermes core deps (same pin as discord-extensions).
+discord.py==2.7.1
