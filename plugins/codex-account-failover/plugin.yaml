@@ -1,0 +1,14 @@
+name: codex-account-failover
+label: Codex Account Failover
+kind: standalone
+version: 0.1.0
+description: >
+  On a non-credential failure of the openai-codex primary (empty/malformed response,
+  reasoning-only stall, server error, overload, timeout, unclassified error, WAF block),
+  retry the same model once per turn on another available account of the codex
+  credential pool before fallback_providers take over. The failed account is not benched;
+  the session moves back to the preferred account at the next turn (Hermes' own
+  credential-revert hook). Credential failures keep Hermes' pool rotation; safety refusals
+  and request-shape errors go straight to fallback_providers. A missing or changed core
+  seam is logged as one WARNING naming the lost behaviour.
+author: nkowne63
