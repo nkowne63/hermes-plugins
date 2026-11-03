@@ -492,7 +492,7 @@ def test_async_twin_streams_through_the_auxiliary_seam():
     fake = FakeCascade(_frames({"delta_text": "a"}, {"delta_text": "b"}))
     async_client, model = _to_async_client(_client(fake), "swe-1-6")
     if not isinstance(async_client, transport.AsyncDevinClient):
-        pytest.xfail("Hermes core lacks the as_async_client seam (fork commit e36881c1e7): "
+        pytest.xfail("Hermes core lacks the as_async_client seam (fork commit f9d48abe01): "
                      f"_to_async_client rebuilt the Devin client as {type(async_client).__name__}")
     assert model == "swe-1-6"
 
@@ -604,7 +604,7 @@ def test_browser_login_sends_no_client_id_and_pools_the_session_token(monkeypatc
     assert devin_plugin._auth_handler("add", SimpleNamespace(provider="devin", auth_type="api-key")) is False
     assert devin_plugin._auth_handler("status", SimpleNamespace(provider="devin")) is False
     if "client_id" in query:
-        pytest.xfail("Hermes core lacks the PKCE no-client_id fix (fork commit 577c293229): "
+        pytest.xfail("Hermes core lacks the PKCE no-client_id fix (fork commit e7ba6d1d7a): "
                      f"the authorize URL carries client_id={query['client_id']!r}")
 
 

@@ -42,8 +42,8 @@ Two seams live in the Hermes core (the nkowne63/hermes-agent fork); on a Hermes 
 
 | Fork commit | Seam | Without it |
 |---|---|---|
-| `577c293229` feat(auth): PKCE plugin login sends no client_id when the config declares none | `hermes_cli/auth_oauth_pkce_plugin.login` | the browser sign-in's authorize URL carries an empty `client_id=` |
-| `e36881c1e7` feat(aux): a provider-supplied client may name its own async twin | `agent/auxiliary_client._to_async_client` | async auxiliary calls (rebuilt as `AsyncOpenAI` from the base URL) speak OpenAI JSON to the Cascade server and fail |
+| `e7ba6d1d7a` feat(auth): PKCE plugin login sends no client_id when the config declares none | `hermes_cli/auth_oauth_pkce_plugin.login` | the browser sign-in's authorize URL carries an empty `client_id=` |
+| `f9d48abe01` feat(aux): a provider-supplied client may name its own async twin | `agent/auxiliary_client._to_async_client` | async auxiliary calls (rebuilt as `AsyncOpenAI` from the base URL) speak OpenAI JSON to the Cascade server and fail |
 
 The main chat path, model listing and API-key auth need no core change. Only the default in-process plugin
 isolation is exercised: under `plugins.isolation: host` the profile's methods run in the plugin host, and
