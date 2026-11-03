@@ -30,3 +30,6 @@ plugins:
   - repo: nkowne63/hermes-plugins
     subdir: plugins/subagent-messaging
     ref: f5f8890290577a17bb85ce64b1870bd091a2cc9b
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/codex-account-failover
+    ref: 22dc9b056b3865ac13ff6434546cef1d0a0e4365
