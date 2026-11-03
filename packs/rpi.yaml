@@ -4,11 +4,11 @@
 name: rpi
 description: nkowne63 rpi Hermes plugin set (replaces fork commits; see README)
 author: nkowne63
-version: 2026.10.30
+version: 2026.11.04
 plugins:
   - repo: nkowne63/hermes-plugins
     subdir: plugins/session-reset-policy
-    ref: b2b0f488d15cf8c6a07bd8d887accbfdd5d89198
+    ref: 6f22b920153b908a4fc573eb70ba1291805e189a
   - repo: nkowne63/hermes-plugins
     subdir: plugins/always-loaded-skills
     ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
@@ -20,7 +20,7 @@ plugins:
     ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
   - repo: nkowne63/hermes-plugins
     subdir: plugins/devin
-    ref: 4c87bfe3414bdbdbd38d8d9f1a3cda217b917f91
+    ref: d99142ea0d6fed4dcda6868b063e8fac12509ae9
   - repo: nkowne63/hermes-plugins
     subdir: plugins/delegation-no-stall
     ref: 6bb03ec1b59eb0882a22786b065ad5c4a92998d8
