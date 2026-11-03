@@ -13,9 +13,6 @@ plugins:
     subdir: plugins/always-loaded-skills
     ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
   - repo: nkowne63/hermes-plugins
-    subdir: plugins/channel-silence
-    ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
-  - repo: nkowne63/hermes-plugins
     subdir: plugins/thread-only-display
     ref: 455ee05dacc0ae01de9ef886c3d656efad6f07a7
   - repo: nkowne63/hermes-plugins

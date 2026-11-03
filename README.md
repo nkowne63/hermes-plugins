@@ -20,7 +20,6 @@ Hermes core lives here, so the fork itself only carries changes the plugin API c
 |---|---|---|---|
 | `session-reset-policy` | Idle/daily session reset (vendored fork of fastfinge's), per channel/guild, reset notice | `session_reset.*` | — |
 | `always-loaded-skills` | Skills injected into every agent incl. delegate children | `skills.always_loaded` | — (llm_request middleware) |
-| `channel-silence` | Per-channel "silence allowed" | `<platform>.channel_overrides.<id>.allow_silence` | `BasePlatformAdapter._drop_unresolved` |
 | `thread-only-display` | Progress/thinking only inside threads for listed channels | `display.thread_only_channels` | `_run_agent_display_settings`, `_hmwa_prepend_reasoning` |
 | `discord-extensions` | Discord guild/category/channel defaults; auto-thread starter reply references | `discord.{guild,category,channel}_defaults` | Discord adapter internals (see its README) |
 | `devin` | Devin (Cognition) model provider | credentials via `hermes auth add devin` | needs fork commits for PKCE without client_id and the async-client seam |
@@ -30,8 +29,10 @@ Hermes core lives here, so the fork itself only carries changes the plugin API c
 | `discord-status-card` | Discord threads under listed channels: one status card per turn (embed edited in place; [詳細] log, [中断] = `/stop`) instead of per-tool progress, interim messages and the heartbeat | `display.status_card_channels` | `_run_agent_display_settings`, `_run_agent_bind_turn_wiring`, the task-card rail (`_native_slack_task_cards` + adapter methods), `DiscordAdapter._resolve_channel` / `_run_simple_slash` / `_component_live_auth` (see its README) |
 
 Every private dependency is checked at startup (one WARNING naming the lost behaviour) and by a test that fails
-when upstream changes it. Still in the fork because no plugin seam exists: per-channel `reasoning_effort`, the
-Astra model-cache fix, and the two core seams `devin` needs.
+when upstream changes it. Still in the fork because no plugin seam exists: the Astra model-cache fix, the two core
+seams `devin` needs, and the async-delegation delivery hardening. Retired with Hermes v0.22.6: `channel-silence`
+(core reads `channel_overrides.<id>.allow_silence` itself, queued follow-ups and crash recovery included) and the
+fork's per-channel `reasoning_effort`.
 
 ## Install
 
