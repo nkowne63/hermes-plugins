@@ -33,3 +33,6 @@ plugins:
   - repo: nkowne63/hermes-plugins
     subdir: plugins/codex-account-failover
     ref: 22dc9b056b3865ac13ff6434546cef1d0a0e4365
+  - repo: nkowne63/hermes-plugins
+    subdir: plugins/discord-status-card
+    ref: a54fc222d3094b9cad951de9cc4099598756592a
