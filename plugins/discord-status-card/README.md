@@ -62,7 +62,7 @@ exhausted) → 失敗. When the turn ends without `on_session_end` the card show
 
 ### Delegated tasks (v0.2.0)
 
-Each `delegate_task` child gets its own card in the commissioning Discord thread, titled with its subagent ID
+Each `delegate_task` child gets its own card at the commissioning Discord destination, titled with its subagent ID
 and task goal. Synchronous, background and nested children use the same display; parallel children never share
 tool IDs, logs or token counts. A parent's card can finish before its background children: their cards continue
 updating until their own runners return. No child cards are created for parents without a status card.
@@ -104,14 +104,14 @@ Installed only in a gateway process: at `register` when `gateway.run` is already
 Checked before anything is installed. Any problem leaves the core untouched and logs one WARNING per problem:
 
 ```
-discord-status-card: DiscordAdapter._resolve_channel is missing, so status cards are off: turns in threads under
-display.status_card_channels keep the core display (per-tool progress messages, interim assistant messages, the
-long-running heartbeat). Update the plugin for this Hermes version.
+discord-status-card: DiscordAdapter._resolve_channel is missing, so status cards are off: selected Discord turns
+keep the core display (per-tool progress messages, interim assistant messages, the long-running heartbeat).
+Update the plugin for this Hermes version.
 ```
 
 | Seam | Used for |
 |---|---|
-| `GatewayRunner._run_agent_display_settings(self, source)`, `GatewayRunner._RunAgentDisplay` fields `user_config`, `platform_key`, `progress_mode`, `tool_progress_enabled`, `interim_assistant_messages_enabled`, `_thinking_enabled`, `_native_slack_task_cards`, `needs_progress_queue`, `_display_surface_mode` | the per-thread switch |
+| `GatewayRunner._run_agent_display_settings(self, source)`, `GatewayRunner._RunAgentDisplay` fields `user_config`, `platform_key`, `progress_mode`, `tool_progress_enabled`, `interim_assistant_messages_enabled`, `_thinking_enabled`, `_native_slack_task_cards`, `needs_progress_queue`, `_display_surface_mode` | the per-turn switch |
 | `GatewayRunner._run_agent_bind_turn_wiring(...)`, `TurnContext` fields `source`, `session_key`, `user_config`, `_progress_metadata`, `mute_notification_reply`, `scheduled_heartbeat`, `GatewayRunner._delivery_adapter_for` | opening the card |
 | `GatewayTurnProgressMixin.send_progress_messages` / `_send_native_task_card_progress` | the rail calling `send_/stop_native_task_card_progress` |
 | `DiscordAdapter._resolve_channel(channel_id)`, `_run_simple_slash(interaction, command_text, followup_msg)`, `_component_live_auth(interaction)`, `_allowed_user_ids`, `_allowed_role_ids`; `adapter_component_auth._component_check_auth` | embed send/edit, [中断] |
