@@ -792,3 +792,153 @@ def test_coexists_with_thread_only_display(monkeypatch, tmp_path):
     check(cards=False, thread_only=True)
     _unload(tod2)
     check(cards=False, thread_only=False)
+
+
+@pytest.fixture
+def delegated_family(plugin, monkeypatch):
+    from run_agent import AIAgent
+    from tools import delegate_tool as dt
+    import tools.delegate_tool_config as dtc
+    monkeypatch.setattr(dt, "_load_config", dict)
+    monkeypatch.setattr(dtc, "_load_config", dict)
+    monkeypatch.setattr(dt, "_build_child_system_prompt", lambda *_a, **_kw: "CHILD PROMPT")
+    parent = AIAgent(api_key="k", base_url="https://openrouter.ai/api/v1", provider="openrouter",
+                     api_mode="chat_completions", model="anthropic/claude-sonnet-4.6", quiet_mode=True,
+                     skip_memory=True, save_trajectories=False, enabled_toolsets=["file"], session_id="parent")
+    children = []
+
+    def build(goal, index=0):
+        child = dt._build_child_agent(task_index=index, goal=goal, context=None, toolsets=["file"], model=None,
+                                     max_iterations=4, task_count=1, parent_agent=parent)
+        children.append(child)
+        return child
+
+    yield parent, build
+    for child in children:
+        child.close()
+    parent.close()
+
+
+def _open_parent_card(plugin, adapter):
+    from gateway.session_context import set_session_vars
+    tokens = set_session_vars(platform="discord", chat_id=THREAD, thread_id=THREAD, session_key="parent-route",
+                              user_id=REQUESTER)
+    plugin._open_card(adapter, SimpleNamespace(session_key="parent-route", _progress_metadata={}), _source())
+    return plugin._cards["parent-route"], tokens
+
+
+def _script_child(child, text, gate=None, *, fail=False):
+    def converse(**_kwargs):
+        start = child.tool_start_callback
+        if start:
+            start("same-call-id", "terminal", {"command": text})
+        _fire("on_interim_message", text=text, session_id=child.session_id)
+        _fire("post_api_request", session_id=child.session_id, usage={"prompt_tokens": 123, "output_tokens": 7})
+        if gate is not None:
+            gate.wait(5)
+        _fire("post_tool_call", session_id=child.session_id, tool_call_id="same-call-id", tool_name="terminal",
+              duration_ms=25, status="ok")
+        return {"final_response": text, "messages": [], "api_calls": 1, "completed": not fail, "failed": fail,
+                "interrupted": child._interrupt_requested}
+    child.run_conversation = converse
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background", [False, True])
+async def test_child_cards_survive_parent_and_isolate_parallel_events(plugin, delegated_family, background):
+    from gateway.session_context import clear_session_vars
+    from tools import delegate_tool as dt
+    from tools.delegate_tool_child_run import _detach_child
+    parent, build = delegated_family
+    adapter = _adapter_cls()()
+    parent_card, tokens = _open_parent_card(plugin, adapter)
+    try:
+        a, b = build("task A"), build("task B", 1)
+        _script_child(a, "work A")
+        _script_child(b, "work B", fail=True)
+        if background:
+            _detach_child(parent, a)
+            _detach_child(parent, b)
+            parent_card.on_outcome(completed=True, failed=False, interrupted=False, reason="done")
+            parent_card.finish()
+            plugin._cards.clear()  # the gateway retires the parent's rail before children finish
+        results = await asyncio.gather(
+            asyncio.to_thread(dt._run_single_child, 0, "task A", a, parent),
+            asyncio.to_thread(dt._run_single_child, 1, "task B", b, parent))
+        assert [r["status"] for r in results] == ["completed", "failed"]
+        assert await _eventually(lambda: len(_cards(adapter)) == 3)
+        assert await _eventually(lambda: all(m.latest["labels"] == ["詳細"] for m in _cards(adapter)[1:]))
+        cards = {m.latest["embed"].title: m for m in _cards(adapter)[1:]}
+        ac = next(m for title, m in cards.items() if "task A" in title)
+        bc = next(m for title, m in cards.items() if "task B" in title)
+        assert ac.latest["embed"].title.startswith("✅")
+        assert bc.latest["embed"].title.startswith("⚠️")
+        for message, own, other in ((ac, "work A", "work B"), (bc, "work B", "work A")):
+            card = message.latest["view"].card
+            assert own in card.details_text() and other not in card.details_text()
+            assert "ツール 1" in message.latest["embed"].description
+            assert "in 123 / out 7" in message.latest["embed"].description
+        assert parent_card.tokens_in == 0 and parent_card.tools == {}
+    finally:
+        clear_session_vars(tokens)
+        parent_card.finish()
+
+
+@pytest.mark.asyncio
+async def test_child_stop_targets_only_authorized_child(plugin, delegated_family):
+    import threading
+    from gateway.session_context import clear_session_vars
+    from tools import delegate_tool as dt
+    parent, build = delegated_family
+    adapter = _adapter_cls()()
+    parent_card, tokens = _open_parent_card(plugin, adapter)
+    gate = threading.Event()
+    child = build("stop this child")
+    _script_child(child, "waiting", gate)
+    task = asyncio.create_task(asyncio.to_thread(dt._run_single_child, 0, "stop this child", child, parent))
+    try:
+        assert await _eventually(lambda: len(_cards(adapter)) == 2)
+        card = _cards(adapter)[1].latest["view"].card
+        stranger = _interaction(STRANGER)
+        await card.request_stop(stranger)
+        assert not child._interrupt_requested and stranger.response.messages[0]["ephemeral"]
+        await card.request_stop(_interaction(REQUESTER))
+        assert child._interrupt_requested and not parent._interrupt_requested and adapter.slash == []
+        gate.set()
+        assert (await task)["status"] == "interrupted"
+        assert await _eventually(lambda: _cards(adapter)[1].latest["embed"].title.startswith("⏹"))
+    finally:
+        gate.set()
+        await task
+        clear_session_vars(tokens)
+        parent_card.finish()
+
+
+@pytest.mark.asyncio
+async def test_codex_child_tool_completion_without_post_tool_hook(plugin, delegated_family):
+    from agent.codex_runtime import make_codex_app_server_event_bridge
+    from gateway.session_context import clear_session_vars
+    from tools import delegate_tool as dt
+    parent, build = delegated_family
+    adapter = _adapter_cls()()
+    parent_card, tokens = _open_parent_card(plugin, adapter)
+    child = build("Codex child")
+
+    def converse(**_kwargs):
+        bridge = make_codex_app_server_event_bridge(child)
+        item = {"type": "commandExecution", "id": "cmd-1", "command": "false", "status": "inProgress"}
+        bridge({"method": "item/started", "params": {"item": item}})
+        bridge({"method": "item/completed", "params": {"item": {
+            **item, "status": "completed", "exitCode": 1, "aggregatedOutput": "failed", "durationMs": 12}}})
+        return {"final_response": "reported failure", "messages": [], "api_calls": 1, "completed": True}
+
+    child.run_conversation = converse
+    try:
+        await asyncio.to_thread(dt._run_single_child, 0, "Codex child", child, parent)
+        assert await _eventually(lambda: len(_cards(adapter)) == 2)
+        card = _cards(adapter)[1].latest["view"].card
+        tool, = card.tools.values()
+        assert tool["ended"] is not None and tool["status"] == "error"
+    finally:
+        clear_session_vars(tokens)
+        parent_card.finish()

@@ -29,6 +29,8 @@ resolution is Slack-specific. The plugin
 * observes ``post_api_request`` (tokens, reasoning), ``post_tool_call`` (duration, error),
   ``on_interim_message``, ``on_session_end`` (outcome) and ``agent_loop_stopped`` (``/stop``). Hooks run on side
   threads the agent waits for, so they only record under a lock and wake the card's writer on the gateway loop.
+* wraps child construction/run to retain the originating thread and give every delegated child a separate
+  card, context-local hooks, ID-correlated tool callbacks and a child-only stop button.
 
 Both gateway wraps are installed on ``gateway.run.GatewayRunner`` itself (they delegate to the inherited
 implementation), so they never touch the mixin methods other plugins (thread-only-display) wrap. Installed only
@@ -41,7 +43,9 @@ the lost behaviour and nothing is installed (the core display stays). Card write
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
+import functools
 import importlib
 import inspect
 import io
@@ -50,10 +54,11 @@ import re
 import sys
 import threading
 import time
+import weakref
 from contextlib import suppress
 from typing import Any, Optional
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +109,7 @@ _registrations = 0
 _warned: set[str] = set()
 _registry_lock = threading.Lock()
 _cards: dict[str, "_Card"] = {}  # session key -> latest card of that session
+_child_card: contextvars.ContextVar[Optional["_Card"]] = contextvars.ContextVar("discord_child_card", default=None)
 
 
 # ── which turns ──────────────────────────────────────────────────────
@@ -234,6 +240,9 @@ class _Card:
         self._writer: Optional[asyncio.Task] = None
         self._last_write = 0.0
         self._write_failed = False
+        self.subagent_id = ""
+        self.child_ref: Any = None
+        self.goal = ""
 
     # events (any thread) ------------------------------------------------
 
@@ -250,6 +259,12 @@ class _Card:
             }
             self._log({"kind": "tool", "at": now, "id": call_id})
         return tool
+
+    def on_tool_start(self, call_id: str, name: str) -> None:
+        with self.lock:
+            self._tool(call_id, name, time.time())
+            self.last_event = time.time()
+        self.poke_threadsafe()
 
     def on_rail_tasks(self, tasks: Any) -> None:
         """Tool start / completion as the core rail publishes them (``{id, title, status}``)."""
@@ -381,7 +396,8 @@ class _Card:
     def render(self) -> tuple[str, str, int]:
         """(title, description, color) of the card now."""
         with self.lock:
-            name = f" — {self.thread_name}" if self.thread_name else ""
+            label_name = f"{self.subagent_id} · {_one_line(self.goal, 160)}" if self.subagent_id else self.thread_name
+            name = f" — {label_name}" if label_name else ""
             if self.finished:
                 label, color = _FINAL_STATES[self.final_state()]
                 return f"{label}{name}"[:256], self._summary(), color
@@ -443,7 +459,8 @@ class _Card:
     async def send_details(self, interaction: Any) -> None:
         import discord
         text = self.details_text()
-        title = f"詳細 — {self.thread_name}" if self.thread_name else "詳細"
+        title = f"詳細 — {self.subagent_id} · {self.goal}" if self.subagent_id else (
+            f"詳細 — {self.thread_name}" if self.thread_name else "詳細")
         if len(text) <= _EMBED_TEXT_LIMIT:
             await interaction.response.send_message(
                 embed=discord.Embed(title=title[:256], description=text), ephemeral=True)
@@ -473,6 +490,16 @@ class _Card:
             return
         if self.finished:
             await interaction.response.send_message("このターンはもう終わっています。", ephemeral=True)
+            return
+        if self.subagent_id:
+            from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock, interrupt_subagent
+            with _active_subagents_lock:
+                record = _active_subagents.get(self.subagent_id)
+                live = record is not None and record.get("agent") is self.child_ref()
+            stopped = live and interrupt_subagent(self.subagent_id)
+            await interaction.response.send_message(
+                "この子エージェントに中断を要求しました。" if stopped else "この子エージェントはもう実行中ではありません。",
+                ephemeral=True)
             return
         await self.adapter._run_simple_slash(interaction, "/stop")
 
@@ -599,9 +626,10 @@ def _in_delegate_child() -> bool:
 
 
 def _hook_card() -> Optional[_Card]:
-    """This turn's card while its agent runs (None in delegate children and outside listed threads)."""
+    """The executing child gets its own card, never the latest parent turn's card."""
     if _in_delegate_child():
-        return None
+        card = _child_card.get()
+        return card if card is not None and not card.finished else None
     key = _bound_session_key()
     card = _cards.get(key) if key else None
     return card if card is not None and card.outcome is None else None
@@ -708,6 +736,126 @@ def _wrap_bind(cls: type, own: Any) -> Any:
     return _mark(_run_agent_bind_turn_wiring)
 
 
+def _wrap_child_build(original: Any) -> Any:
+    @functools.wraps(original)
+    def build(*args: Any, **kwargs: Any) -> Any:
+        route = _hook_card()
+        child = original(*args, **kwargs)
+        # Capture before dispatch: background children may start after the parent's rail has retired.
+        if route is not None:
+            child._discord_status_card_route = (route.adapter, route.loop, route.dest, route.requester)
+        return child
+    build._discord_status_card_original = original
+    return _mark(build)
+
+
+def _wrap_child_run(original: Any) -> Any:
+    @functools.wraps(original)
+    def run(task_index, goal, child=None, parent_agent=None, **kwargs):
+        route = getattr(child, "_discord_status_card_route", None)
+        if route is None or route[1].is_closed():
+            return original(task_index, goal, child, parent_agent, **kwargs)
+        adapter, loop, dest, requester = route
+        card = _Card(adapter=adapter, loop=loop, keys=(), dest=dest, requester=requester, metadata=None)
+        card.subagent_id = str(getattr(child, "_subagent_id", "") or "")
+        card.child_ref = weakref.ref(child)
+        card.goal = goal
+        start = getattr(child, "tool_start_callback", None)
+        complete = getattr(child, "tool_complete_callback", None)
+        progress = getattr(child, "tool_progress_callback", None)
+        completion = threading.local()
+
+        def tool_progress(event_type, name=None, *args, **kw):
+            # Codex emits its authoritative verdict immediately before the ID-bearing completion.
+            # Keep it thread-local: concurrent calls of the same tool must never exchange verdicts.
+            if event_type == "tool.completed":
+                completion.value = (name, kw)
+            if progress is not None:
+                return progress(event_type, name, *args, **kw)
+
+        if progress is not None:
+            functools.update_wrapper(tool_progress, progress)
+
+        def tool_start(call_id, name, args):
+            completion.value = None
+            card.on_tool_start(call_id, name)
+            if start is not None:
+                start(call_id, name, args)
+
+        def tool_complete(call_id, name, args, result):
+            from agent.display import _detect_tool_failure
+            meta = getattr(completion, "value", None)
+            completion.value = None
+            duration_ms = None
+            if meta is not None and meta[0] == name and "is_error" in meta[1]:
+                is_error, reason = meta[1]["is_error"], None
+                duration = meta[1].get("duration")
+                if isinstance(duration, (int, float)):
+                    duration_ms = duration * 1000
+            else:
+                is_error, reason = _detect_tool_failure(name, result)
+            card.on_tool_end(call_id, name, duration_ms, "error" if is_error else "ok", reason if is_error else None)
+            if complete is not None:
+                complete(call_id, name, args, result)
+
+        child.tool_start_callback = tool_start
+        child.tool_complete_callback = tool_complete
+        child.tool_progress_callback = tool_progress
+        token = _child_card.set(card)
+        card.poke_threadsafe()
+        try:
+            result = original(task_index, goal, child, parent_agent, **kwargs)
+            # The runner owns the final verdict (also exceptions, timeouts and schema retries).
+            card.on_outcome(completed=result.get("status") == "completed" and not result.get("truncated"),
+                            failed=result.get("status") not in {"completed", "interrupted"},
+                            interrupted=result.get("status") == "interrupted", reason=result.get("exit_reason"))
+            return result
+        finally:
+            child.tool_start_callback = start
+            child.tool_complete_callback = complete
+            child.tool_progress_callback = progress
+            _child_card.reset(token)
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(card.finish)
+    run._discord_status_card_original = original
+    return _mark(run)
+
+
+_CHILD_SEAMS = (
+    ("_build_child_agent", ("task_index", "goal", "parent_agent"), _wrap_child_build),
+    ("_run_single_child", ("task_index", "goal", "child", "parent_agent"), _wrap_child_run),
+)
+
+
+def _install_children() -> None:
+    try:
+        module = importlib.import_module("tools.delegate_tool")
+        registry = importlib.import_module("tools.delegate_tool_registry")
+    except Exception as exc:
+        _warn_once(f"delegation modules are not importable ({exc})", "so child status cards are off")
+        return
+    for mod, name in (("agent.display", "_detect_tool_failure"),
+                      ("agent.delegation_context", "is_delegated_child_context"),
+                      ("tools.delegate_tool_registry", "interrupt_subagent")):
+        if not callable(_optional(mod, name)):
+            _warn_once(f"{mod}.{name} is missing", "so child status cards are off")
+            return
+    if (not isinstance(getattr(registry, "_active_subagents", None), dict)
+            or not hasattr(getattr(registry, "_active_subagents_lock", None), "__enter__")):
+        _warn_once("the live subagent registry is missing", "so child status cards are off")
+        return
+    for name, required, _factory in _CHILD_SEAMS:
+        method = getattr(module, name, None)
+        params = _params(method) if callable(method) else None
+        if params is None or not all(key in params for key in required):
+            _warn_once(f"tools.delegate_tool.{name} is missing or re-signed", "so child status cards are off")
+            return
+    for name, _required, factory in _CHILD_SEAMS:
+        method = getattr(module, name)
+        if not _mine(method):
+            setattr(module, name, factory(method))
+
+
 _RUNNER_SEAMS = (
     ("_run_agent_display_settings", ["self", "source"], _wrap_display),
     ("_run_agent_bind_turn_wiring",
@@ -808,9 +956,16 @@ def install() -> None:
     for name, func in _ADAPTER_METHODS.items():
         if not _mine(adapter_cls.__dict__.get(name)):
             setattr(adapter_cls, name, _mark(func))
+    _install_children()
 
 
 def uninstall() -> None:
+    module = sys.modules.get("tools.delegate_tool")
+    if module is not None:
+        for name, *_rest in _CHILD_SEAMS:
+            method = getattr(module, name, None)
+            if _mine(method):
+                setattr(module, name, method._discord_status_card_original)
     runner_cls = getattr(sys.modules.get("gateway.run"), "GatewayRunner", None)
     if runner_cls is not None:
         for name, *_rest in _RUNNER_SEAMS:

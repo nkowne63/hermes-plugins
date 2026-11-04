@@ -53,6 +53,21 @@ Outcome: `on_session_end`'s `interrupted` → 中断, `completed` → 完了, an
 exhausted) → 失敗. When the turn ends without `on_session_end` the card shows 中断 after an `agent_loop_stopped`
 (`/stop`, `/new`), else 失敗; a late `on_session_end` corrects it.
 
+### Delegated tasks (v0.2.0)
+
+Each `delegate_task` child gets its own card in the commissioning Discord thread, titled with its subagent ID
+and task goal. Synchronous, background and nested children use the same display; parallel children never share
+tool IDs, logs or token counts. A parent's card can finish before its background children: their cards continue
+updating until their own runners return. No child cards are created for parents without a status card.
+
+Child cards have the same [詳細] button. Their [中断] button uses `interrupt_subagent` for that exact live child,
+not the thread's `/stop`; the requester/allowlist authorization is unchanged. The core may also stop descendants
+of that child, but not its parent or siblings. Completion, failure, interruption and iteration exhaustion come
+from the child's runner result, including failures that occur before a session-end hook.
+
+Tools use the ID-bearing start/complete callbacks; Codex app-server completion verdicts and durations come from
+its progress callback, paired on the emitting thread with the immediately following ID-bearing callback.
+
 ## How it works
 
 The core already has a per-turn task-card rail (`GatewayTurnProgressMixin._send_native_task_card_progress`):
@@ -71,8 +86,8 @@ Both wraps are set on `GatewayRunner` itself and delegate to the inherited mixin
 `thread-only-display` (which wraps `GatewayTurnMixin`) and either plugin can be unloaded independently. The
 methods are added to the bundled `plugins.platforms.discord.adapter.DiscordAdapter`, so discord-extensions'
 subclass inherits them; the adapter class is not swapped. Hooks run on threads the agent waits for: they only
-record under a lock and wake the card's writer on the gateway loop (`loop.call_soon_threadsafe`). Events from
-`delegate_task` children (`agent.delegation_context.is_delegated_child_context()`) are ignored.
+record under a lock and wake the card's writer on the gateway loop (`loop.call_soon_threadsafe`). Child hooks
+use a separate context-local card, never the parent's session-key lookup.
 
 Installed only in a gateway process: at `register` when `gateway.run` is already imported, else on the first
 `pre_gateway_dispatch`. `plugins.isolation: in_process` (the default) is required.
@@ -93,6 +108,9 @@ long-running heartbeat). Update the plugin for this Hermes version.
 | `GatewayRunner._run_agent_bind_turn_wiring(...)`, `TurnContext` fields `source`, `session_key`, `user_config`, `_progress_metadata`, `mute_notification_reply`, `scheduled_heartbeat`, `GatewayRunner._delivery_adapter_for` | opening the card |
 | `GatewayTurnProgressMixin.send_progress_messages` / `_send_native_task_card_progress` | the rail calling `send_/stop_native_task_card_progress` |
 | `DiscordAdapter._resolve_channel(channel_id)`, `_run_simple_slash(interaction, command_text, followup_msg)`, `_component_live_auth(interaction)`, `_allowed_user_ids`, `_allowed_role_ids`; `adapter_component_auth._component_check_auth` | embed send/edit, [中断] |
+| `tools.delegate_tool._build_child_agent`, `_run_single_child` (wrapped) | capture the originating route before background dispatch; open/finalize each child's card independently |
+| `AIAgent.tool_start_callback`, `tool_complete_callback`, `tool_progress_callback`; `agent.display._detect_tool_failure` | child tool lifecycle, including native Codex events |
+| `tools.delegate_tool_registry._active_subagents`, `_active_subagents_lock`, `interrupt_subagent` | exact live-child identity and child-only stop |
 
 Optional (a problem is a WARNING; the card stays without that detail): `agent.agent_runtime_helpers.extract_reasoning`,
 `gateway.session_context.bound_session_key`, `agent.delegation_context.is_delegated_child_context`.
@@ -105,3 +123,9 @@ Following upstream: `scripts/test-plugin.sh discord-status-card` against the new
 - `test_registers_on_this_hermes_without_a_warning` fails when the startup check would warn on the rpi;
   `test_missing_*` / `test_resigned_*` / `test_display_dataclass_change_*` prove the fallback.
 - `test_coexists_with_thread_only_display` fails when the two wraps start interfering.
+- `test_child_cards_survive_parent_and_isolate_parallel_events` covers synchronous/background child cards,
+  repeated tool IDs in parallel children, parent retirement, separate usage/logs, and completed/failed outcomes.
+- `test_child_stop_targets_only_authorized_child` covers unauthorized refusal and the real hard-interrupt state
+  on the child without interrupting its parent.
+- `test_codex_child_tool_completion_without_post_tool_hook` drives the core Codex event bridge to prove failed
+  command completion reaches the child card without a `post_tool_call` hook.
