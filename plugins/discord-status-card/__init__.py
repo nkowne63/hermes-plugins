@@ -1,8 +1,8 @@
-"""Hermes discord-status-card plugin: one status card per turn in Discord threads of listed channels.
+"""Hermes discord-status-card plugin: one status card per Discord turn, globally or in listed threads.
 
-For a Discord turn whose source is a thread whose parent channel is listed in ``display.status_card_channels``
-(threads Hermes auto-creates for a message in the channel included), the turn shows ONE embed message, edited in
-place, instead of per-tool progress messages, interim assistant messages and the long-running heartbeat:
+With ``display.status_cards: true``, every Discord turn gets ONE embed message, edited in place, instead of
+per-tool progress messages, interim assistant messages and the long-running heartbeat. Alternatively,
+``display.status_card_channels`` selects only threads under listed parent channels:
 
 * while running: state (``💭 推論中`` / ``🔧 ツール実行中``) and the thread name, last event and start time
   (Discord ``<t:…:R>`` timestamps), the latest reasoning or interim text (~200 chars), the last tool, the tool
@@ -19,7 +19,7 @@ driven by the per-turn display flag ``_native_slack_task_cards`` and duck-typed 
 resolution is Slack-specific. The plugin
 
 * wraps ``_run_agent_display_settings(self, source)`` to set the flag, turn the text tool progress, interim
-  messages and thinking off and report ``long_running_notifications`` as ``off`` for listed threads;
+  messages and thinking off and report ``long_running_notifications`` as ``off`` for selected Discord turns;
 * wraps ``_run_agent_bind_turn_wiring(self, turn_ctx, turn_runner, source, event_message_id,
   _native_slack_task_cards)`` to open the card once the turn's routing is known (not for scheduled heartbeat or
   muted diagnostic turns, which keep the core's quiet display);
@@ -58,7 +58,7 @@ import weakref
 from contextlib import suppress
 from typing import Any, Optional
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ _TEXT_LIMIT = 8000  # characters kept per interim / reasoning entry
 _EMBED_TEXT_LIMIT = 4000  # longer details go out as a file
 
 _MARK = "_discord_status_card_wrapped"
-_LOST = ("so status cards are off: turns in threads under display.status_card_channels keep the core display "
+_LOST = ("so status cards are off: selected Discord turns keep the core display "
          "(per-tool progress messages, interim assistant messages, the long-running heartbeat)")
 _DISPLAY_FIELDS = (
     "user_config", "platform_key", "progress_mode", "tool_progress_enabled", "interim_assistant_messages_enabled",
@@ -127,11 +127,14 @@ def _configured_channels(user_config: Any) -> set[str]:
     return {str(value).strip() for value in configured if str(value).strip()}
 
 
-def is_status_card_thread(user_config: Any, source: Any) -> bool:
-    """True for a Discord thread whose parent channel is listed in ``display.status_card_channels``."""
+def is_status_card_source(user_config: Any, source: Any) -> bool:
+    """Select every Discord destination globally, or only threads under explicitly listed channels."""
     platform = getattr(source, "platform", None)
     if str(getattr(platform, "value", platform) or "").lower() != "discord":
         return False
+    display = user_config.get("display") if isinstance(user_config, dict) else None
+    if isinstance(display, dict) and display.get("status_cards") is True:
+        return bool(getattr(source, "thread_id", None) or getattr(source, "chat_id", None))
     if not getattr(source, "thread_id", None):
         return False
     parent = str(getattr(source, "parent_chat_id", "") or "").strip()
@@ -704,7 +707,7 @@ def _wrap_display(cls: type, own: Any) -> Any:
     def _run_agent_display_settings(self, source):
         disp = own(self, source) if own is not None else super(cls, self)._run_agent_display_settings(source)
         try:
-            if (is_status_card_thread(disp.user_config, source) and not _tool_progress_explicitly_off(disp)
+            if (is_status_card_source(disp.user_config, source) and not _tool_progress_explicitly_off(disp)
                     and _card_adapter(self._delivery_adapter_for(source))):
                 return card_display(disp)
         except Exception:
@@ -724,7 +727,7 @@ def _wrap_bind(cls: type, own: Any) -> Any:
                 turn_ctx, turn_runner, source, event_message_id, _native_slack_task_cards)
         try:
             if (_native_slack_task_cards and not turn_ctx.mute_notification_reply and not turn_ctx.scheduled_heartbeat
-                    and is_status_card_thread(turn_ctx.user_config, source)):
+                    and is_status_card_source(turn_ctx.user_config, source)):
                 adapter = self._delivery_adapter_for(source)
                 if _card_adapter(adapter):
                     _open_card(adapter, turn_ctx, source)
@@ -1004,4 +1007,4 @@ def register(ctx: Any) -> None:
     logger.info("discord-status-card v%s armed", __version__)
 
 
-__all__ = ["register", "install", "uninstall", "is_status_card_thread", "card_display", "__version__"]
+__all__ = ["register", "install", "uninstall", "is_status_card_source", "card_display", "__version__"]

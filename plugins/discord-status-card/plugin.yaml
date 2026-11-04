@@ -1,14 +1,15 @@
 name: discord-status-card
 label: Discord Status Card
 kind: standalone
-version: 0.2.0
+version: 0.3.0
 description: >
-  display.status_card_channels: a turn in a Discord thread under a listed channel shows one
-  status card (embed, edited in place, debounced) with state, last event, reasoning/interim
+  display.status_cards: true enables one status card for every Discord turn; alternatively,
+  display.status_card_channels selects only threads under listed channels. The status card
+  (embed, edited in place, debounced) shows state, last event, reasoning/interim
   excerpt, last tool, tool count and tokens, plus [詳細] (ephemeral full log) and [中断]
   (/stop for the requester or allowlisted users), instead of per-tool progress messages,
   interim assistant messages and the long-running heartbeat. Each delegate_task child gets
-  a separate card in the same thread, including background children after the parent returns;
+  a separate card at the same destination, including background children after the parent returns;
   its [中断] stops that child only. Drives the core task-card rail and child callbacks;
   installed only in a gateway process. A missing or changed core seam is logged as one WARNING
   naming the lost behaviour (the core display stays).

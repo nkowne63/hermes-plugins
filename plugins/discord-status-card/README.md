@@ -1,26 +1,33 @@
 # discord-status-card
 
-In Discord threads under listed channels, a turn shows **one status card** (an embed edited in place) instead of
-per-tool progress messages, interim assistant messages and the 180 s "still working" heartbeat. The final reply
-is delivered as a separate message, as before.
+A Discord turn shows **one status card** (an embed edited in place) instead of per-tool progress messages,
+interim assistant messages and the 180 s "still working" heartbeat. The final reply is delivered as a separate
+message, as before. Enable it globally, or opt in only threads under listed channels.
 
 ## Config
 
 ```yaml
 display:
-  status_card_channels: ["1501181227359539401"]   # parent channel IDs: YAML list, int, or "id1, id2"
+  status_cards: true   # all Discord turns: threads, channel replies and DMs
 ```
 
 ```bash
-hermes config set display.status_card_channels '["1501181227359539401"]'
+hermes config set display.status_cards true
 ```
 
-A turn gets a card when its source is a Discord **thread** whose parent channel is listed. That includes the
-thread Hermes auto-creates for a message posted in the channel (`auto_thread`): that source is the new thread
-with `parent_chat_id` set to the channel, so the card goes into the thread the reply goes to. Turns in the
-parent channel itself and in other channels keep the core display. An explicit `tool_progress: off` keeps cards
-off too (the core's rule for Slack task cards). Scheduled heartbeat turns and muted diagnostic turns keep the
-core's quiet display (no card).
+Global mode covers every Discord destination the adapter can send to, including future channels, non-thread
+channel replies and DMs. It does not enable cards on other platforms. Cards go to the turn's reply destination:
+the thread when present, otherwise the channel/DM.
+
+To keep the narrower opt-in instead, omit `status_cards` (or set it to `false`) and set
+`display.status_card_channels: ["1501181227359539401"]` (parent channel IDs: YAML list, int, or `"id1, id2"`).
+Only Discord **threads** under those parents get cards, including threads Hermes auto-creates (`auto_thread`);
+parent-channel replies and other channels keep the core display. An empty list enables no channels.
+`status_cards` must be a YAML boolean; global mode does not require or use a channel list.
+
+An explicit `tool_progress: off` keeps cards off (the core's rule for Slack task cards). Scheduled heartbeat
+turns and muted diagnostic turns keep the core's quiet display (no card). Button authorization, delegated-child
+cards and final-reply delivery are unchanged in global mode.
 
 ## The card
 
@@ -77,7 +84,7 @@ stop call at turn cleanup. Only the flag's resolution is Slack-specific. The plu
 
 | Part | What |
 |---|---|
-| `GatewayRunner._run_agent_display_settings(self, source)` (wrapped) | listed threads: `_native_slack_task_cards=True`, `needs_progress_queue=True`, `tool_progress_enabled=False`, `interim_assistant_messages_enabled=False`, `_thinking_enabled=False`, and `_display_surface_mode("long_running_notifications")` → `off` (only when the turn's adapter carries the card methods) |
+| `GatewayRunner._run_agent_display_settings(self, source)` (wrapped) | selected Discord turns: `_native_slack_task_cards=True`, `needs_progress_queue=True`, `tool_progress_enabled=False`, `interim_assistant_messages_enabled=False`, `_thinking_enabled=False`, and `_display_surface_mode("long_running_notifications")` → `off` (only when the turn's adapter carries the card methods) |
 | `GatewayRunner._run_agent_bind_turn_wiring(self, turn_ctx, turn_runner, source, event_message_id, _native_slack_task_cards)` (wrapped) | opens the card when the turn really uses the card lane, keyed by the session key and the turn's progress metadata dict |
 | `DiscordAdapter.send_native_task_card_progress` / `stop_native_task_card_progress` (added) | rail input: tool start / completion, then the final edit; always report success so the rail never falls back to text |
 | hooks | `post_api_request` (usage, reasoning via `extract_reasoning`), `post_tool_call` (duration, status, error), `on_interim_message`, `on_session_end` (outcome), `agent_loop_stopped` (`/stop`) |
@@ -129,3 +136,9 @@ Following upstream: `scripts/test-plugin.sh discord-status-card` against the new
   on the child without interrupting its parent.
 - `test_codex_child_tool_completion_without_post_tool_hook` drives the core Codex event bridge to prove failed
   command completion reaches the child card without a `post_tool_call` hook.
+
+## Changelog
+
+- **0.3.0**: add `display.status_cards: true` for all Discord turns, including non-thread replies and DMs.
+  Keep channel-scoped opt-in when global mode is off, and preserve quiet turns, explicit progress opt-out,
+  card contents, button authorization and per-child cards.

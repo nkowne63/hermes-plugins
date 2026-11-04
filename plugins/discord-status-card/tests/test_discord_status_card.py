@@ -215,19 +215,52 @@ OTHER_THREAD_SOURCE = {"chat_id": OTHER_THREAD, "thread_id": OTHER_THREAD, "pare
         (None, THREAD_SOURCE, False),
     ],
 )
-def test_is_status_card_thread(configured, source_kw, expected):
-    match = _load_plugin().is_status_card_thread
+def test_is_status_card_source_channel_opt_in(configured, source_kw, expected):
+    match = _load_plugin().is_status_card_source
     assert match({"display": {"status_card_channels": configured}}, _source(**source_kw)) is expected
 
 
 def test_only_discord_threads_match():
     from gateway.config import Platform
-    match = _load_plugin().is_status_card_thread
+    match = _load_plugin().is_status_card_source
     config = {"display": {"status_card_channels": [CONSOLE]}}
     assert match(config, _source(platform=Platform.SLACK)) is False
     assert match({}, _source()) is False
     assert match({"display": "bad"}, _source()) is False
     assert match(None, _source()) is False
+
+
+@pytest.mark.parametrize("source_kw", [THREAD_SOURCE, OTHER_THREAD_SOURCE, PARENT_SOURCE,
+                                      {"chat_id": "444", "thread_id": None, "parent": None, "chat_type": "dm"}])
+@pytest.mark.parametrize("enabled", [True, False, None, "true"])
+def test_global_selector_requires_boolean_and_covers_discord_destinations(source_kw, enabled):
+    match = _load_plugin().is_status_card_source
+    assert match({"display": {"status_cards": enabled}}, _source(**source_kw)) is (enabled is True)
+
+
+def test_global_selector_preserves_platform_boundary_and_channel_opt_in():
+    from gateway.config import Platform
+    match = _load_plugin().is_status_card_source
+    config = {"display": {"status_cards": True}}
+    assert match(config, _source(platform=Platform.SLACK)) is False
+    assert match(config, _source(chat_id="", thread_id=None, parent=None)) is False
+    scoped = {"display": {"status_cards": False, "status_card_channels": [CONSOLE]}}
+    assert match(scoped, _source()) is True
+    assert match(scoped, _source(**OTHER_THREAD_SOURCE)) is False
+    assert match(scoped, _source(**PARENT_SOURCE)) is False
+
+
+@pytest.mark.parametrize("quiet_field", ["scheduled_heartbeat", "mute_notification_reply"])
+def test_global_cards_keep_quiet_turns_quiet(plugin, monkeypatch, quiet_field):
+    opened = []
+    monkeypatch.setattr(plugin, "_open_card", lambda *_args: opened.append(True))
+    ctx = SimpleNamespace(user_config={"display": {"status_cards": True}},
+                          scheduled_heartbeat=False, mute_notification_reply=False)
+    setattr(ctx, quiet_field, True)
+    runner = SimpleNamespace(_delivery_adapter_for=lambda _source: _adapter_cls()())
+    wrapped = plugin._wrap_bind(type(runner), lambda *_args: "core-result")
+    assert wrapped(runner, ctx, None, _source(**PARENT_SOURCE), None, True) == "core-result"
+    assert opened == []
 
 
 # ── per-turn display settings ────────────────────────────────────────
@@ -277,8 +310,10 @@ def test_parent_and_other_channels_keep_normal_display(plugin, monkeypatch, tmp_
     _assert_normal_display(_display(monkeypatch, tmp_path, _source(**source_kw)))
 
 
-def test_explicit_tool_progress_off_keeps_cards_off(plugin, monkeypatch, tmp_path):
-    disp = _display(monkeypatch, tmp_path, _source(), {**DISPLAY, "tool_progress": "off"})
+@pytest.mark.parametrize("global_cards", [False, True])
+def test_explicit_tool_progress_off_keeps_cards_off(plugin, monkeypatch, tmp_path, global_cards):
+    disp = _display(monkeypatch, tmp_path, _source(),
+                    {**DISPLAY, "status_cards": global_cards, "tool_progress": "off"})
     assert disp._native_slack_task_cards is False
     assert disp.tool_progress_enabled is False
     assert disp.interim_assistant_messages_enabled is True
@@ -534,6 +569,23 @@ async def test_parent_and_other_threads_get_no_card(plugin, monkeypatch, tmp_pat
     texts = [call["content"] for call in adapter.sent]
     assert _cards(adapter) == []
     assert CardAgent.interim in texts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kw", [THREAD_SOURCE, OTHER_THREAD_SOURCE, PARENT_SOURCE,
+                                      {"chat_id": "444", "thread_id": None, "parent": None, "chat_type": "dm"}])
+async def test_global_turn_renders_one_card_at_its_destination(plugin, monkeypatch, tmp_path, source_kw):
+    adapter, result = await _turn(monkeypatch, tmp_path, CardAgent, source_kw,
+                                  display={"tool_progress": "all", "status_cards": True})
+    card = await _final_card(adapter, "✅")
+    assert result["final_response"] == "done"
+    assert adapter.sent == [] and adapter.edits == []
+    assert len(_cards(adapter)) == 1
+    source = _source(**source_kw)
+    assert str(card.channel.id) == str(source.thread_id or source.chat_id)
+    assert card.sent["labels"] == ["詳細", "中断"]
+    assert card.latest["labels"] == ["詳細"]
+    assert "ツール 2" in card.latest["embed"].description
 
 
 @pytest.mark.asyncio
