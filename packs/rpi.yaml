@@ -32,4 +32,4 @@ plugins:
     ref: 22dc9b056b3865ac13ff6434546cef1d0a0e4365
   - repo: nkowne63/hermes-plugins
     subdir: plugins/discord-status-card
-    ref: 04f8f51ada1c454254dde12b0fcf20325116e81a
+    ref: a1cb704cdb0ed8df27aecdda767d8b17aca3baf3
