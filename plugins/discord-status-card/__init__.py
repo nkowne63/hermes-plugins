@@ -231,6 +231,7 @@ class _Card:
         self.log: list[dict] = []
         self.excerpt = ""
         self.tokens_in = self.tokens_out = 0
+        self.context_tokens: Optional[int] = None
         self.outcome: Optional[str] = None  # completed | failed | interrupted, from on_session_end
         self.exit_reason: Optional[str] = None
         self.stop_requested = False
@@ -309,7 +310,12 @@ class _Card:
         now = time.time()
         with self.lock:
             if isinstance(usage, dict):
-                self.tokens_in += int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                prompt = usage.get("prompt_tokens")
+                if prompt is None:
+                    prompt = usage.get("input_tokens")
+                if prompt is not None:
+                    self.context_tokens = int(prompt)
+                    self.tokens_in += self.context_tokens
                 self.tokens_out += int(usage.get("output_tokens") or 0)
             if reasoning and reasoning.strip():
                 self.excerpt = reasoning
@@ -391,10 +397,15 @@ class _Card:
     def final_state(self) -> str:
         return self.outcome or ("interrupted" if self.stop_requested else "failed")
 
+    def _token_summary(self) -> str:
+        context = "未取得" if self.context_tokens is None else _fmt_tokens(self.context_tokens)
+        return (f"context（直近API入力） {context} · ターン累計 入力 {_fmt_tokens(self.tokens_in)} / "
+                f"出力 {_fmt_tokens(self.tokens_out)}（キャッシュ含む）")
+
     def _summary(self) -> str:
         label, _color = _FINAL_STATES[self.final_state()]
         return (f"{label} · {_fmt_duration((self.finished_at or time.time()) - self.started)} · "
-                f"ツール {len(self.tools)} · in {_fmt_tokens(self.tokens_in)} / out {_fmt_tokens(self.tokens_out)}")
+                f"ツール {len(self.tools)} · {self._token_summary()}")
 
     def render(self) -> tuple[str, str, int]:
         """(title, description, color) of the card now."""
@@ -417,8 +428,7 @@ class _Card:
                 if last["ended"] is not None:
                     line += f" · {_fmt_ms(last['duration_ms']) or _fmt_duration(last['ended'] - last['started'])}"
                 lines.append(line)
-            lines.append(f"ツール {len(self.tools)} · トークン in {_fmt_tokens(self.tokens_in)} / "
-                         f"out {_fmt_tokens(self.tokens_out)}")
+            lines.append(f"ツール {len(self.tools)} · {self._token_summary()}")
             state = _STATE_TOOL if running else _STATE_REASONING
             return f"{state}{name}"[:256], "\n".join(lines), _COLOR_RUNNING
 

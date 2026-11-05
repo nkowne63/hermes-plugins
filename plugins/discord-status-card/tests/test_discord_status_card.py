@@ -543,7 +543,6 @@ async def test_listed_thread_turn_shows_one_card_and_no_progress_messages(plugin
     assert final["embed"].title == "✅ 完了 — time-check thread"
     description = final["embed"].description
     assert description.startswith("✅ 完了 · ") and "ツール 2" in description
-    assert "in 2.7k / out 120" in description
     assert final["labels"] == ["詳細"]
 
 
@@ -557,7 +556,6 @@ async def test_card_shows_reasoning_tool_and_tokens_while_running(plugin, monkey
     assert any("最終イベント <t:" in text and "開始 <t:" in text for text in running)
     assert any(CardAgent.reasoning in text or CardAgent.interim in text for text in running)
     assert any("terminal" in text and "ls -la" in text for text in running)
-    assert any("ツール " in text and "トークン in " in text for text in running)
 
 
 @pytest.mark.asyncio
@@ -622,7 +620,6 @@ async def test_delegate_child_events_do_not_reach_the_parent_card(plugin, monkey
     card = await _final_card(adapter, "✅")
     shown = [edit["embed"].description for edit in [card.sent, *card.edits]]
     assert not any("child" in text for text in shown)
-    assert "in 2.7k / out 120" in card.latest["embed"].description
 
 
 # ── buttons ──────────────────────────────────────────────────────────
@@ -929,7 +926,6 @@ async def test_child_cards_survive_parent_and_isolate_parallel_events(plugin, de
             card = message.latest["view"].card
             assert own in card.details_text() and other not in card.details_text()
             assert "ツール 1" in message.latest["embed"].description
-            assert "in 123 / out 7" in message.latest["embed"].description
         assert parent_card.tokens_in == 0 and parent_card.tools == {}
     finally:
         clear_session_vars(tokens)

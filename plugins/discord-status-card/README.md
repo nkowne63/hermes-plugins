@@ -38,12 +38,17 @@ While the turn runs:
 最終イベント 3秒前 · 開始 1分前（52s）            (Discord <t:…:R> timestamps)
 > latest reasoning or interim text (~200 chars; line omitted when there is none)
 ✅ terminal — ls -la · 120ms                     (last tool: ✅ / ⏳ / ❌ / 🚫, preview, duration)
-ツール 6 · トークン in 12.3k / out 456            (this turn: prompt tokens incl. cache / output tokens)
+ツール 6 · context（直近API入力） 3.2k · ターン累計 入力 12.3k / 出力 456（キャッシュ含む）
 [詳細] [中断]
 ```
 
-At the end, one final edit: `✅ 完了 · 32s · ツール 6 · in 12.3k / out 456` (or `⚠️ 失敗`, `⏹ 中断`), [中断]
+At the end, one final edit: `✅ 完了 · 32s · ツール 6 · context（直近API入力） 3.2k · ターン累計 入力 12.3k / 出力 456（キャッシュ含む）` (or `⚠️ 失敗`, `⏹ 中断`), [中断]
 removed, [詳細] kept for 24 h (views are in memory: after a gateway restart old buttons stop working).
+
+`context` is the latest reported API prompt input, not a sum or an exact measurement of the current
+in-memory history after the response. It can shrink after compaction. Before input usage is reported it
+shows `未取得`; missing usage leaves the last reported value intact. Turn totals sum every API call's
+input (including cache) and output, so repeated history reads can make totals much larger than context.
 
 - **[詳細]**: an ephemeral reply to whoever clicks, with the whole turn: each tool (start time, status, preview,
   duration, error), every interim text and reasoning excerpt in order, and the outcome / exit reason. Over 4000
